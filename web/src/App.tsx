@@ -481,6 +481,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
 
   return (
     <div className="app" data-theme={theme}>
+      <a className="skip-link" href="#conversation-stage">跳到对话区</a>
       {renderWater && (
         <Suspense fallback={<div className="lake-background lake-background--static" aria-hidden="true" />}>
           <LakeBackground theme={theme} />
@@ -518,7 +519,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
           <span className="header-watermark">BLUE LAKE</span>
         </header>
 
-        <div className="conversation-stage">
+        <div className="conversation-stage" id="conversation-stage" tabIndex={-1}>
           {loadingMessages ? (
             <div className="history-loading" role="status">
               <span />
