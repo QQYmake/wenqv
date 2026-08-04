@@ -31,13 +31,25 @@ logger = logging.getLogger(__name__)
 
 
 class SPAStaticFiles(StaticFiles):
-    """Serve Vite assets and fall back to index.html for client routes."""
+    """Serve Vite assets and fall back to index.html for client routes.
+
+    API paths (``/api/*``) are excluded from the fallback: a missing API route
+    must surface as a JSON 404, never as the SPA shell (which the frontend then
+    fails to parse as JSON, e.g. "Unexpected token '<', \"<!doctype ...").
+    """
 
     async def get_response(self, path: str, scope: dict) -> Any:
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code == 404 and "." not in Path(path).name:
+            # StaticFiles normalizes paths with os.sep; on Windows that yields
+            # backslashes ("api\user\config"), so compare on a "/" view.
+            normalized = path.replace("\\", "/")
+            if (
+                exc.status_code == 404
+                and "." not in Path(normalized).name
+                and not normalized.startswith("api/")
+            ):
                 return await super().get_response("index.html", scope)
             raise
 
@@ -295,20 +307,21 @@ def _build_client_resolver(user_config_repo: Any, default_llm: Any) -> Any:
     return LLMResolverAdapter(user_config_repo, default_llm)
 
 
-app: FastAPI | None = None
-
-
 def get_app() -> FastAPI:
     """Create the production app lazily.
 
-    ``app`` is exposed as a module-level attribute via __getattr__ so that simply
-    importing server.main (e.g. in tests) does not eagerly build it — important
-    because the production config.yaml sets llm.require_user_config=true, which
-    fails fast when AGENT_SECRET_KEY is unset.
+    ``app`` is exposed as a module-level attribute via ``__getattr__`` so that
+    simply importing server.main (e.g. in tests) does not eagerly build it —
+    important because the production config.yaml sets
+    ``llm.require_user_config=true``, which fails fast when AGENT_SECRET_KEY is
+    unset. Note there must be NO module-level ``app = None`` binding: it would
+    shadow ``__getattr__`` and make ``uvicorn server.main:app`` resolve to
+    ``None``, crashing every request with 500.
     """
 
     global app
-    if app is None:
+    existing = globals().get("app")
+    if existing is None:
         app = create_app()
     return app
 

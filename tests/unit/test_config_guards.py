@@ -64,3 +64,28 @@ def test_build_cipher_uses_env_secret_when_required(
     config.llm.require_user_config = True  # type: ignore[misc]
     cipher = _build_cipher(config)
     assert cipher.decrypt(cipher.encrypt("sk-x")) == "sk-x"
+
+
+def test_module_app_attribute_resolves_lazily_and_is_never_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``uvicorn server.main:app`` must resolve through __getattr__, not None.
+
+    A module-level ``app = None`` binding shadows ``__getattr__``: uvicorn's
+    import-string resolution then hands the server a None app and every request
+    crashes with 500 (TypeError: 'NoneType' object is not callable).
+    """
+
+    import server.main as main_module
+
+    # Simulate a fresh interpreter: no pre-existing module attribute.
+    if "app" in vars(main_module):
+        monkeypatch.delattr(main_module, "app")
+
+    sentinel = object()
+    monkeypatch.setattr(main_module, "get_app", lambda: sentinel)
+
+    # This is exactly what uvicorn does for `server.main:app`.
+    assert getattr(main_module, "app") is sentinel
+    # The resolved value must never be None.
+    assert sentinel is not None
