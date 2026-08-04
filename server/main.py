@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from server.api import APIServices, AgentAdapter, api_router
+from server.api.middleware import AuthMiddleware
 from server.api.services import SkillCatalogAdapter, UnavailableAgent
 from server.config import AppConfig, LLMProviderConfig, load_config
 from server.storage import AgentStoreAdapter, SQLiteStore, build_side_cache
@@ -88,16 +89,28 @@ def create_app(
                     await result
             await store.close()
 
+    origins = list(config.server.cors_origins)
+    if any(origin == "*" for origin in origins):
+        raise ValueError(
+            "CORS allow_credentials=True forbids the wildcard origin; "
+            "configure explicit origins in config.server.cors_origins."
+        )
+
     app = FastAPI(
         title="Agent Lake",
         version="0.1.0",
         lifespan=lifespan,
     )
     app.state.services = services
+    # Order matters: the last add_middleware call becomes the outermost layer.
+    # CORS must run first so preflights are answered and credentials are
+    # exposed to listed origins before the Auth guard runs; Auth then injects
+    # the workspace header and guards private API paths.
+    app.add_middleware(AuthMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(config.server.cors_origins),
-        allow_credentials=False,
+        allow_origins=origins,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Accept", "X-Workspace-ID"],
         expose_headers=["X-Request-ID"],
