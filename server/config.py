@@ -40,6 +40,8 @@ def _float(value: Any, default: float, *, minimum: float, maximum: float) -> flo
 def _env_bool(value: str | None, default: bool) -> bool:
     if value is None:
         return default
+    if isinstance(value, bool):
+        return value
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -83,6 +85,7 @@ class LLMProviderConfig:
 class LLMSettings:
     main: LLMProviderConfig = field(default_factory=LLMProviderConfig)
     summary: LLMProviderConfig | None = None
+    require_user_config: bool = False
 
     def for_role(self, role: str) -> LLMProviderConfig:
         if role == "main":
@@ -230,6 +233,10 @@ def load_config(
     raw = _load_yaml(selected_path)
 
     llm_data = _mapping(raw.get("llm"))
+    require_user_config = _env_bool(
+        env.get("AGENT_REQUIRE_USER_CONFIG", llm_data.get("require_user_config")),
+        False,
+    )
     main = _provider_with_env(_mapping(llm_data.get("main")), env, "AGENT_MAIN")
     raw_summary = llm_data.get("summary")
     summary_env_present = any(key.startswith("AGENT_SUMMARY_") for key in env)
@@ -280,7 +287,7 @@ def load_config(
 
     redis_value = env.get("REDIS_URL", storage_data.get("redis_url"))
     config = AppConfig(
-        llm=LLMSettings(main=main, summary=summary),
+        llm=LLMSettings(main=main, summary=summary, require_user_config=require_user_config),
         agent=AgentSettings(
             max_turns=_integer(
                 env.get("AGENT_MAX_TURNS", agent_data.get("max_turns")), 20

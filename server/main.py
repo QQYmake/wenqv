@@ -256,17 +256,21 @@ def _llm_mapping(provider: LLMProviderConfig) -> dict[str, Any]:
 def _build_cipher(config: AppConfig) -> Any:
     """Build the Fernet cipher from AGENT_SECRET_KEY.
 
-    Change 2 uses an ephemeral dev key when the env var is absent so importing
-    server.main and running existing tests never fails. Change 3 tightens this
-    to fail-fast when ``llm.require_user_config`` is true.
+    When ``llm.require_user_config`` is true the per-user config path is the
+    primary flow: a missing AGENT_SECRET_KEY fails fast at startup so encrypted
+    keys are never silently unreadable. When it is false (the legacy default
+    path), an ephemeral dev key is used and a warning is logged.
     """
 
-    from server.storage.encryption import FernetCipher, KeyManager
+    from server.storage.encryption import EncryptionError, FernetCipher, KeyManager
 
     key_manager = KeyManager()
     if not key_manager.configured:
-        # Dev/test fallback: an in-memory key. Rotates per process, so encrypted
-        # user keys are unreadable after restart — production must set the env.
+        if config.llm.require_user_config:
+            raise EncryptionError(
+                "AGENT_SECRET_KEY is not set but llm.require_user_config is true; "
+                "set AGENT_SECRET_KEY before starting the server."
+            )
         try:
             from cryptography.fernet import Fernet
         except ImportError as exc:  # pragma: no cover - dependency guard
@@ -291,13 +295,38 @@ def _build_client_resolver(user_config_repo: Any, default_llm: Any) -> Any:
     return LLMResolverAdapter(user_config_repo, default_llm)
 
 
-app = create_app()
+app: FastAPI | None = None
+
+
+def get_app() -> FastAPI:
+    """Create the production app lazily.
+
+    ``app`` is exposed as a module-level attribute via __getattr__ so that simply
+    importing server.main (e.g. in tests) does not eagerly build it — important
+    because the production config.yaml sets llm.require_user_config=true, which
+    fails fast when AGENT_SECRET_KEY is unset.
+    """
+
+    global app
+    if app is None:
+        app = create_app()
+    return app
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
-    uvicorn.run("server.main:app", host=app.state.services.config.server.host, port=app.state.services.config.server.port)
+    uvicorn.run(
+        "server.main:app",
+        host=get_app().state.services.config.server.host,
+        port=get_app().state.services.config.server.port,
+    )
 
 
-__all__ = ["app", "create_app"]
+__all__ = ["app", "create_app", "get_app"]
