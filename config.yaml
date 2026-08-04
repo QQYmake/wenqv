@@ -1,0 +1,42 @@
+llm:
+  main:
+    base_url: https://api.openai.com/v1
+    api_key: ""
+    model: gpt-4.1-mini
+    max_tokens: 4096
+    temperature: 0.2
+    timeout_s: 120
+  # Optional. When omitted or incomplete, summary tasks reuse llm.main.
+  # summary:
+  #   base_url: https://api.openai.com/v1
+  #   api_key: ""
+  #   model: gpt-4.1-nano
+  #   max_tokens: 1024
+
+agent:
+  max_turns: 20
+  max_tool_retries: 2
+  tool_timeout_s: 60
+  tool_result_max_chars: 24000
+
+context:
+  token_budget: 32000
+  summary_trigger_ratio: 0.8
+  preserve_recent_messages: 10
+
+storage:
+  sqlite_path: data/agent.db
+  redis_url: ""
+  cache_ttl_s: 86400
+
+workspace:
+  id: default
+  root: .
+
+server:
+  host: 127.0.0.1
+  port: 8000
+  cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+

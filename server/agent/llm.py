@@ -1,0 +1,275 @@
+"""OpenAI-compatible LLM adapter with main/summary role selection."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Literal, cast
+
+from .models import (
+    ChatMessage,
+    LLMResponse,
+    LLMStreamChunk,
+    ToolCall,
+    ToolCallDelta,
+)
+from .ports import LLMClient
+
+
+LLMRole = Literal["main", "summary"]
+
+
+@dataclass(frozen=True, slots=True)
+class LLMConfig:
+    base_url: str
+    api_key: str
+    model: str
+    max_tokens: int | None = None
+    temperature: float | None = None
+    timeout_s: float = 120.0
+    extra_body: Mapping[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "LLMConfig":
+        known = {
+            "base_url",
+            "api_key",
+            "model",
+            "max_tokens",
+            "temperature",
+            "timeout_s",
+            "extra_body",
+        }
+        missing = [key for key in ("base_url", "api_key", "model") if not value.get(key)]
+        if missing:
+            raise ValueError(f"Missing LLM configuration: {', '.join(missing)}")
+        extra = dict(value.get("extra_body") or {})
+        # Unknown provider-specific keys are sent in ``extra_body``.
+        extra.update({key: val for key, val in value.items() if key not in known})
+        return cls(
+            base_url=str(value["base_url"]),
+            api_key=str(value["api_key"]),
+            model=str(value["model"]),
+            max_tokens=(int(value["max_tokens"]) if value.get("max_tokens") else None),
+            temperature=(
+                float(value["temperature"]) if value.get("temperature") is not None else None
+            ),
+            timeout_s=float(value.get("timeout_s", 120.0)),
+            extra_body=extra,
+        )
+
+    @classmethod
+    def from_value(cls, value: Any) -> "LLMConfig":
+        """Coerce mappings or application-level config objects at the edge."""
+
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, Mapping):
+            return cls.from_mapping(value)
+        keys = (
+            "base_url",
+            "api_key",
+            "model",
+            "max_tokens",
+            "temperature",
+            "timeout_s",
+            "extra_body",
+        )
+        mapped = {key: getattr(value, key) for key in keys if hasattr(value, key)}
+        if not all(key in mapped for key in ("base_url", "api_key", "model")):
+            raise TypeError(
+                "LLM source must be a client, mapping, LLMConfig, or config-like object"
+            )
+        return cls.from_mapping(mapped)
+
+    def __post_init__(self) -> None:
+        if self.timeout_s <= 0:
+            raise ValueError("LLM timeout_s must be positive")
+
+
+def _arguments_from_json(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {"__raw_arguments__": raw}
+    if isinstance(parsed, dict):
+        return parsed
+    return {"__raw_arguments__": raw}
+
+
+class OpenAICompatClient:
+    """Thin adapter around ``openai.AsyncOpenAI``.
+
+    The dependency is imported lazily so the domain and unit tests do not need
+    the OpenAI package installed. A compatible SDK client may also be injected.
+    """
+
+    def __init__(self, config: LLMConfig, *, sdk_client: Any | None = None) -> None:
+        self.config = config
+        self._sdk_client = sdk_client
+
+    def _client(self) -> Any:
+        if self._sdk_client is None:
+            try:
+                from openai import AsyncOpenAI
+            except ImportError as exc:  # pragma: no cover - integration guard
+                raise RuntimeError(
+                    "The 'openai' package is required for OpenAICompatClient"
+                ) from exc
+            self._sdk_client = AsyncOpenAI(
+                base_url=self.config.base_url,
+                api_key=self.config.api_key,
+                timeout=self.config.timeout_s,
+            )
+        return self._sdk_client
+
+    def _request(self, messages: Sequence[ChatMessage], **overrides: Any) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": [message.to_llm_dict() for message in messages],
+        }
+        tools = overrides.get("tools")
+        if tools:
+            request["tools"] = list(tools)
+            request["tool_choice"] = "auto"
+        max_tokens = overrides.get("max_tokens") or self.config.max_tokens
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
+        if self.config.temperature is not None:
+            request["temperature"] = self.config.temperature
+        if self.config.extra_body:
+            request["extra_body"] = dict(self.config.extra_body)
+        return request
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict] | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        response = await self._client().chat.completions.create(
+            **self._request(messages, tools=tools, max_tokens=max_tokens),
+            stream=False,
+        )
+        choice = response.choices[0]
+        message = choice.message
+        calls = tuple(
+            ToolCall(
+                id=str(call.id),
+                name=str(call.function.name),
+                arguments=_arguments_from_json(call.function.arguments),
+            )
+            for call in (message.tool_calls or ())
+        )
+        return LLMResponse(
+            content=message.content or "",
+            tool_calls=calls,
+            finish_reason=getattr(choice, "finish_reason", None),
+        )
+
+    async def stream(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict] | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        response = await self._client().chat.completions.create(
+            **self._request(messages, tools=tools, max_tokens=max_tokens),
+            stream=True,
+        )
+        async for chunk in response:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+            tool_deltas = tuple(
+                ToolCallDelta(
+                    index=int(call.index),
+                    id=getattr(call, "id", None),
+                    name=(
+                        getattr(getattr(call, "function", None), "name", None)
+                        or None
+                    ),
+                    arguments_delta=(
+                        getattr(getattr(call, "function", None), "arguments", None)
+                        or ""
+                    ),
+                )
+                for call in (getattr(delta, "tool_calls", None) or ())
+            )
+            yield LLMStreamChunk(
+                content_delta=getattr(delta, "content", None) or "",
+                tool_call_deltas=tool_deltas,
+                finish_reason=getattr(choice, "finish_reason", None),
+            )
+
+
+ClientBuilder = Callable[[LLMConfig], LLMClient]
+ClientSource = LLMConfig | Mapping[str, Any] | LLMClient
+
+
+def _looks_like_client(source: object) -> bool:
+    return callable(getattr(source, "stream", None)) and callable(
+        getattr(source, "complete", None)
+    )
+
+
+class LLMClientFactory:
+    """Role-based client provider; summary transparently falls back to main."""
+
+    def __init__(
+        self,
+        main: ClientSource,
+        summary: ClientSource | None = None,
+        *,
+        builder: ClientBuilder = OpenAICompatClient,
+    ) -> None:
+        self._builder = builder
+        self._sources: dict[LLMRole, ClientSource] = {
+            "main": main,
+            "summary": summary if summary is not None else main,
+        }
+        self._clients: dict[int, LLMClient] = {}
+
+    def get_client(self, role: str) -> LLMClient:
+        if role not in ("main", "summary"):
+            raise ValueError("LLM role must be 'main' or 'summary'")
+        source = self._sources[cast(LLMRole, role)]
+        cache_key = id(source)
+        if cache_key not in self._clients:
+            if _looks_like_client(source):
+                client = cast(LLMClient, source)
+            else:
+                config = LLMConfig.from_value(source)
+                client = self._builder(config)
+            self._clients[cache_key] = client
+        return self._clients[cache_key]
+
+
+_default_factory: LLMClientFactory | None = None
+
+
+def configure_clients(
+    main: ClientSource,
+    summary: ClientSource | None = None,
+    *,
+    builder: ClientBuilder = OpenAICompatClient,
+) -> LLMClientFactory:
+    """Configure the optional process-wide provider used by ``get_client``."""
+
+    global _default_factory
+    _default_factory = LLMClientFactory(main, summary, builder=builder)
+    return _default_factory
+
+
+def get_client(role: LLMRole) -> LLMClient:
+    """Return a configured role client, applying summary fallback internally."""
+
+    if _default_factory is None:
+        raise RuntimeError("LLM clients have not been configured")
+    return _default_factory.get_client(role)

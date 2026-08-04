@@ -1,0 +1,12 @@
+[project]
+name = "blue-lake-agent"
+version = "0.1.0"
+description = "A single-process, workspace-isolated tool-using agent chat application."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+

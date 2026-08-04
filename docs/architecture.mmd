@@ -1,0 +1,65 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "LXGW WenKai, sans-serif", "primaryColor": "#dbeef0", "primaryTextColor": "#17343d", "primaryBorderColor": "#79aab2", "lineColor": "#477882", "secondaryColor": "#f3ead8", "tertiaryColor": "#eef4e8"}}}%%
+flowchart TB
+  USER["User / Browser<br/>用户浏览器"]
+
+  subgraph WEB["Web UI - React + Vite SPA<br/>前端界面层"]
+    direction TB
+    WATER["Three.js Lake Background<br/>水面背景"]
+    CHAT["Chat Shell<br/>消息流 / 会话 / Skill 选择"]
+    TRACE["Execution Trace<br/>可折叠工具轨迹"]
+    COMPOSER["Composer<br/>输入 / 中断 / model 标签"]
+  end
+
+  subgraph API["API Layer - FastAPI<br/>接口层"]
+    direction TB
+    CHAT_API["POST /api/chat<br/>fetch 解析 SSE 流"]
+    ABORT_API["POST /api/chat/abort<br/>协作式中断"]
+    SESSION_API["/api/sessions<br/>CRUD + 消息恢复"]
+    SKILL_API["/api/skills + /api/config<br/>Skill 清单 + 安全配置"]
+  end
+
+  subgraph CORE["Agent Core - HTTP independent<br/>核心执行层"]
+    direction TB
+    LOOP["ReAct Loop<br/>LLM 决策 -> 工具调用 -> 结果 -> 回答"]
+    CTX["Context Manager<br/>token 预算 / 摘要 / 截断"]
+    SKILLS["Skill Manager<br/>扫描 / 注入 / 去重 / 移除"]
+    TOOLS["Tool Registry<br/>JSON Schema / 超时 / 截断 / 错误结构"]
+    CLIENTS["LLM Client Factory<br/>main + summary fallback"]
+    STORE_PORT["ConversationStore Port<br/>会话 / 消息 / 轨迹 / Skill 状态"]
+  end
+
+  subgraph ADAPTERS["Adapters and Storage<br/>适配器与存储"]
+    direction TB
+    SQLITE[("SQLite<br/>事实数据源")]
+    REDIS[("Redis<br/>可选 24h 旁路缓存")]
+    SKILL_FILES[("skills/*.md<br/>frontmatter 注册表")]
+    WORKSPACE[("Workspace Files<br/>read_file 安全根目录")]
+    LLM[["OpenAI-compatible API<br/>流式工具调用"]]
+  end
+
+  USER --> CHAT
+  WATER --- CHAT
+  CHAT --> COMPOSER
+  CHAT --> TRACE
+  CHAT ==>|"REST + typed SSE events<br/>类型化事件流"| CHAT_API
+  CHAT --> SESSION_API
+  CHAT --> SKILL_API
+  COMPOSER --> ABORT_API
+
+  CHAT_API ==> LOOP
+  ABORT_API -.-> LOOP
+  SESSION_API --> STORE_PORT
+  SKILL_API --> SKILLS
+
+  LOOP --> CTX
+  LOOP --> SKILLS
+  LOOP --> TOOLS
+  LOOP --> CLIENTS
+  LOOP --> STORE_PORT
+  CTX --> CLIENTS
+
+  STORE_PORT --> SQLITE
+  SQLITE -.->|"read cache / write invalidation<br/>读缓存 / 写失效"| REDIS
+  SKILLS --> SKILL_FILES
+  TOOLS --> WORKSPACE
+  CLIENTS --> LLM
