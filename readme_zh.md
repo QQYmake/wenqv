@@ -147,29 +147,138 @@ Your trusted Skill instructions go here.
 
 Skill 可以通过 `@concise_plan`、UI 选择器或 Agent 的 `load_skill` meta-tool 加载。Skill 文件属于模型指令，在开放给 Agent 之前应视为可信输入并完成审查。
 
-## 项目结构
+## 项目结构与架构
 
-```text
-server/
-  agent/       # 与框架无关的 Agent 策略、端口、上下文、工具和 Skills
-    tools/     # calculator、read_file、load_skill / remove_skill
-  api/         # FastAPI 路由、SSE framing、适配器与运行协调
-    middleware/auth.py   # Cookie 身份 -> X-Workspace-ID，401 守卫
-    user_config.py       # 掩码读取 / 加密写入 / 按角色连接测试
-  storage/     # SQLite repository、user_configs（Fernet）、旁路缓存、workspace 隔离
-  config.py    # YAML 加载与显式环境变量覆盖
-  llm_resolver.py       # 合并用户配置 + 默认值的每 workspace 客户端池
-  main.py      # 懒加载组合根与生产 SPA 托管
-web/src/
-  api/         # REST client 与增量 SSE parser
-  components/  # chat、Markdown、trace、sidebar、welcome、composer、settings
-  scene/       # 装饰性的 Three.js 湖面（懒加载）
-  theme/       # Editorial Lakehouse 视觉系统
-skills/        # 可信 Markdown Skill registry
-tests/         # 单元 + 集成测试（fake LLM / repo 适配器）
-docs/          # 架构源文件、导出图与设计说明
-start.bat      # Windows 一键开发启动脚本（后端）
+完整模块依赖图（规范源文件：[`docs/architecture.mmd`](docs/architecture.mmd)，导出：[`docs/architecture.svg`](docs/architecture.svg) / [`docs/architecture.png`](docs/architecture.png)）：
+
+```mermaid
+flowchart TB
+  USER["User / Browser<br/>用户浏览器"]
+
+  subgraph WEB["React + Vite SPA · web/src"]
+    direction LR
+    APP["App.tsx<br/>bootstrap → 四路并行加载<br/>sendMessage · hydrateHistory<br/>handleAgentEvent 事件归约"]
+    VIEW["components/<br/>Sidebar · Composer · MessageList<br/>ExecutionTrace · Markdown · SettingsPanel"]
+    CLIENT["api/client.ts + api/sse.ts<br/>REST · fetch 流式 SSE 解析<br/>streamChat · abortChat"]
+    SCENE["scene/LakeBackground 懒加载<br/>theme/styles.css 设计令牌"]
+
+    VIEW <--> APP
+    APP --> CLIENT
+    VIEW -.-> SCENE
+  end
+
+  subgraph API["FastAPI 传输与组合 · server/api + server/main"]
+    direction LR
+    ROOT["main.py 懒加载组合根<br/>create_app · __getattr__ · 中间件栈<br/>SPAStaticFiles · Fernet fail-fast"]
+    AUTH["middleware/auth.py<br/>cookie/header → X-Workspace-ID<br/>公开白名单 · 401 守卫"]
+    ROUTES["chat.py + sessions.py<br/>schemas.py · dependencies.py<br/>SSE 流 · abort · 会话 CRUD<br/>412 未配置 · 409 运行冲突"]
+    META["meta.py<br/>bootstrap 身份 cookie<br/>skills 目录 · public config"]
+    UCONFIG["user_config.py<br/>掩码读 · 加密写 · 按角色测试"]
+    SERVICES["services.py<br/>APIServices · RunCoordinator<br/>AgentAdapter · SkillCatalogAdapter"]
+
+    ROOT -.-> AUTH
+    ROOT -.-> ROUTES
+    ROOT -.-> META
+    ROOT -.-> UCONFIG
+    ROOT -.-> SERVICES
+    AUTH -.-> ROUTES
+    AUTH -.-> META
+    AUTH -.-> UCONFIG
+    ROUTES --> SERVICES
+    META --> SERVICES
+  end
+
+  subgraph CORE["HTTP 无关 Agent 核心 · server/agent"]
+    direction LR
+    LOOP["core.py AgentCore._stream<br/>可取消 ReAct 循环<br/>max_turns · 重试 · 超时 · 截断"]
+    CTX["context.py ContextManager<br/>token 预算 · summary 摘要<br/>确定性截断 · 标题生成"]
+    SKILLS["skills.py + registry.py + tools/<br/>SkillManager · ToolRegistry<br/>calculator · read_file · load/remove_skill"]
+    PORTS["ports.py + models.py<br/>ClientResolver · ConversationStore<br/>WorkspaceResolver · LLMClient"]
+
+    LOOP --> CTX
+    LOOP --> SKILLS
+    LOOP --> PORTS
+    CTX --> PORTS
+    SKILLS --> PORTS
+  end
+
+  subgraph INFRA["出站适配器与装配 · server/storage + server/llm_resolver + server/config"]
+    direction LR
+    RESOLVER["llm_resolver.py LLMResolverAdapter<br/>用户配置 ⊕ 默认配置<br/>warm · 客户端池 LRU(32)"]
+    LLMCLIENT["agent/llm.py OpenAICompatClient<br/>懒加载 openai.AsyncOpenAI<br/>complete · stream · summary 回退"]
+    REPO["storage/user_configs.py<br/>UserConfigRepository · Fernet<br/>get_resolved · 掩码 · 留空保留"]
+    ADAPTER["storage/agent_adapter.py<br/>AgentStoreAdapter<br/>ConversationStore 实现"]
+    STORE["storage/sqlite.py SQLiteStore<br/>WAL · to_thread · BEGIN IMMEDIATE<br/>6 张表 · SideCache 失效"]
+    CACHE["storage/cache.py SideCache<br/>内存 TTL 兜底 · Redis 可选"]
+    WS["storage/workspace.py<br/>IsolatedWorkspaceResolver<br/>每 workspace 文件根"]
+    CFG["config.py + config.yaml<br/>AGENT_* 环境变量覆盖"]
+
+    RESOLVER --> LLMCLIENT
+    RESOLVER --> REPO
+    ADAPTER --> STORE
+    STORE --> CACHE
+    CFG -.-> ROOT
+    CFG -.-> RESOLVER
+  end
+
+  DB[("SQLite agent.db<br/>workspaces · sessions · messages<br/>session_skills · user_configs")]
+  REMOTE[["OpenAI-compatible API<br/>main 对话 · summary 摘要/标题"]]
+  REDIS[("Redis · 可选旁路缓存")]
+  SKILLFILES[("skills/*.md<br/>可信模型指令")]
+  WORKSPACEFILES[("workspace 私有文件<br/>read_file 安全根")]
+  SECRET[("AGENT_SECRET_KEY<br/>Fernet 主密钥<br/>start.bat 持久化 .agent_secret_key")]
+
+  USER --> APP
+  CLIENT -->|"GET/POST JSON REST"| META
+  CLIENT -->|"GET/PUT/POST config"| UCONFIG
+  CLIENT ==>|"POST /api/chat<br/>SSE 事件流"| ROUTES
+  CLIENT -.->|"POST /api/chat/abort<br/>协作取消"| ROUTES
+  UCONFIG -->|"读写加密配置"| REPO
+  UCONFIG -.->|"PUT 后 warm 失效"| RESOLVER
+  SERVICES ==>|"AgentAdapter.stream / abort<br/>AgentEvent"| LOOP
+  ROUTES -.->|"首条消息标题 best-effort"| CTX
+  SERVICES -->|"会话/消息直查（API 路径）"| STORE
+  PORTS -->|"ConversationStore 端口"| ADAPTER
+  PORTS -->|"ClientResolver 端口"| RESOLVER
+  PORTS -->|"WorkspaceResolver 端口"| WS
+  CTX -->|"get_client(main/summary)"| PORTS
+  SKILLS --> SKILLFILES
+  SKILLS -->|"read_file 经 workspace_root"| WORKSPACEFILES
+  LLMCLIENT --> REMOTE
+  REPO --> SECRET
+  STORE --> DB
+  CACHE --> REDIS
+  ROOT -->|"托管 web/dist + SPA 回退"| CLIENT
+
+  classDef actor fill:#173f3a,stroke:#173f3a,color:#ffffff,stroke-width:2px;
+  classDef browser fill:#e6eee8,stroke:#648f85,color:#173330,stroke-width:1.4px;
+  classDef application fill:#ece7d9,stroke:#8c8063,color:#2e342f,stroke-width:1.4px;
+  classDef core fill:#f0dfbd,stroke:#a57832,color:#3a2b18,stroke-width:1.5px;
+  classDef infrastructure fill:#d8e6e1,stroke:#638c83,color:#173330,stroke-width:1.4px;
+  classDef resource fill:#e8dfd0,stroke:#9a8a6a,color:#3a3428,stroke-width:1.2px;
+
+  class USER actor;
+  class APP,VIEW,CLIENT,SCENE browser;
+  class ROOT,AUTH,ROUTES,META,UCONFIG,SERVICES application;
+  class LOOP,CTX,SKILLS,PORTS core;
+  class RESOLVER,LLMCLIENT,REPO,ADAPTER,STORE,CACHE,WS,CFG infrastructure;
+  class DB,REMOTE,REDIS,SKILLFILES,WORKSPACEFILES,SECRET resource;
 ```
+
+### 模块职责与依赖链
+
+- **React + Vite SPA（`web/src`）** — `App.tsx` 是运行时状态枢纽：先经 `GET /api/bootstrap` 获取 workspace 身份，再并行加载会话/skills/配置/用户配置，恢复上次会话，并通过 `client.streamChat` + `api/sse.ts` 的增量 SSE 解析器驱动流式对话。`SettingsPanel` 保存每 workspace 的 LLM 配置；API key 留空表示保留服务端已存密钥。
+- **FastAPI 传输层（`server/api` + `server/main`）** — `main.py` 是懒加载组合根；`AuthMiddleware` 把 cookie/header 身份映射为 `X-Workspace-ID`；`chat.py` 把每个 Agent 事件编码为具名 SSE 帧，并通过 `RunCoordinator` + `AgentAdapter` 协调取消（会话不存在 404 / 未配置 412 / 运行冲突 409）；`sessions.py` 是基于 `SQLiteStore` 的 workspace 作用域 CRUD；`user_config.py` 掩码读、加密写、按角色独立探测连接。
+- **与 HTTP 无关的 Agent Core（`server/agent`）** — `AgentCore._stream` 是可取消的 ReAct 循环：校验会话 → 注入所选 Skills → 持久化用户消息 → 每轮 `ContextManager.prepare`（token 预算、summary 角色摘要、确定性截断）→ 主模型流式回合 → 在超时/大小/重试约束下执行工具 → 持久化结果 → 发出类型化事件。它只依赖 `ports.py` 中的端口（`ClientResolver`、`ConversationStore`、`WorkspaceResolver`、`LLMClient`）——不 import FastAPI，也不接触数据库。
+- **出站适配器（`server/storage`、`server/llm_resolver`、`server/agent/llm.py`）** — `AgentStoreAdapter` 在 `SQLiteStore`（WAL、`asyncio.to_thread`、`BEGIN IMMEDIATE`、旁路缓存失效）之上实现 `ConversationStore` 端口；`LLMResolverAdapter` 实现 `ClientResolver`：把每 workspace 加密的用户配置与 `config.yaml` 默认值合并，并按 `(base_url, api_key, model)` 池化 `OpenAICompatClient`；`IsolatedWorkspaceResolver` 为每个 workspace 提供独立的 `read_file` 文件根目录。
+
+关键依赖链：
+
+1. **聊天：** `App.tsx` → `POST /api/chat`（SSE）→ `chat.py`（404/412/409 前置校验）→ `AgentAdapter.stream` → `AgentCore._stream` → `ContextManager.prepare` → `ClientResolver.get_client("main", workspace_id)` → `OpenAICompatClient.stream` → 远程模型；事件以类型化 SSE 帧回流 → `parseSSEStream` → `handleAgentEvent`。
+2. **持久化：** Agent Core 只能经 `ConversationStore → AgentStoreAdapter → SQLiteStore` 访问 SQLite；API 路由直接访问 `SQLiteStore`。每次写入都会使相关 `SideCache` 键失效（内存 TTL 始终可用，Redis 可选）。
+3. **身份 / 配置：** `GET /api/bootstrap` Cookie → `AuthMiddleware` → `X-Workspace-ID` → `dependencies.get_workspace_id` → workspace 作用域（数据库行、文件根、加密的 `user_configs`）；`PUT /api/user/config` 会使 resolver 缓存失效。
+4. **Skills：** `skills/*.md` → `SkillManager.scan` → UI 选择器 / `@mention` / `load_skill` 工具 → 持久化、按会话去重的注入。
+5. **取消：** 浏览器 `AbortController` + `POST /api/chat/abort` → `RunCoordinator.request_abort` + `AgentCore.abort` → 协作式 `AgentRunCancelled` → 终态 `done(finish_reason=aborted)`。
 
 ## 验证
 
