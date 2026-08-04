@@ -1,65 +1,89 @@
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "LXGW WenKai, sans-serif", "primaryColor": "#dbeef0", "primaryTextColor": "#17343d", "primaryBorderColor": "#79aab2", "lineColor": "#477882", "secondaryColor": "#f3ead8", "tertiaryColor": "#eef4e8"}}}%%
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "LXGW WenKai Lite, LXGW WenKai, serif", "background": "#f5f1e5", "primaryColor": "#e6eee8", "primaryTextColor": "#173330", "primaryBorderColor": "#648f85", "lineColor": "#47766f", "secondaryColor": "#f0dfbd", "tertiaryColor": "#d8e6e1", "clusterBkg": "#f8f5ea", "clusterBorder": "#8ca89f", "edgeLabelBackground": "#f8f5ea"}, "flowchart": {"curve": "basis", "nodeSpacing": 26, "rankSpacing": 42}}}%%
 flowchart TB
   USER["User / Browser<br/>用户浏览器"]
 
-  subgraph WEB["Web UI - React + Vite SPA<br/>前端界面层"]
-    direction TB
-    WATER["Three.js Lake Background<br/>水面背景"]
-    CHAT["Chat Shell<br/>消息流 / 会话 / Skill 选择"]
-    TRACE["Execution Trace<br/>可折叠工具轨迹"]
-    COMPOSER["Composer<br/>输入 / 中断 / model 标签"]
+  subgraph WEB["React + Vite SPA<br/>浏览器前端"]
+    direction LR
+    VIEW["Presentation<br/>Sidebar · Welcome · MessageList<br/>Markdown · ExecutionTrace · Composer"]
+    APP["App.tsx state & orchestration<br/>sessions · messages · skills · draft · streaming<br/>event reduction · history hydration · local preferences"]
+    CLIENT["api/client.ts + api/sse.ts<br/>REST · fetch stream · typed SSE parser · abort"]
+    VISUAL["Presentation adapters<br/>LakeBackground · theme · responsive styles"]
+
+    VISUAL -.- VIEW
+    VIEW <--> APP
+    APP --> CLIENT
   end
 
-  subgraph API["API Layer - FastAPI<br/>接口层"]
-    direction TB
-    CHAT_API["POST /api/chat<br/>fetch 解析 SSE 流"]
-    ABORT_API["POST /api/chat/abort<br/>协作式中断"]
-    SESSION_API["/api/sessions<br/>CRUD + 消息恢复"]
-    SKILL_API["/api/skills + /api/config<br/>Skill 清单 + 安全配置"]
+  subgraph API["FastAPI Transport & Application Services<br/>传输与应用协调层"]
+    direction LR
+    ROOT["server.main<br/>composition root · lifespan · CORS · SPA host"]
+    REST["sessions.py + meta.py<br/>session CRUD · history · skills · config<br/>JSON REST"]
+    CHAT["chat.py<br/>POST /api/chat · /api/chat/abort<br/>typed SSE encoding"]
+    SERVICES["APIServices<br/>RunCoordinator · AgentAdapter · SkillCatalogAdapter"]
+
+    ROOT -.->|"startup wiring<br/>启动装配"| REST
+    ROOT -.-> CHAT
+    ROOT -.-> SERVICES
+    REST --> SERVICES
+    CHAT --> SERVICES
   end
 
-  subgraph CORE["Agent Core - HTTP independent<br/>核心执行层"]
-    direction TB
-    LOOP["ReAct Loop<br/>LLM 决策 -> 工具调用 -> 结果 -> 回答"]
-    CTX["Context Manager<br/>token 预算 / 摘要 / 截断"]
-    SKILLS["Skill Manager<br/>扫描 / 注入 / 去重 / 移除"]
-    TOOLS["Tool Registry<br/>JSON Schema / 超时 / 截断 / 错误结构"]
-    CLIENTS["LLM Client Factory<br/>main + summary fallback"]
-    STORE_PORT["ConversationStore Port<br/>会话 / 消息 / 轨迹 / Skill 状态"]
+  subgraph CORE["HTTP-independent Agent Core<br/>核心执行层"]
+    direction LR
+    LOOP["AgentCore<br/>cancellable ReAct loop · bounded failures & turns"]
+    POLICY["ContextManager + SkillManager<br/>budget · summary · truncation · scan · inject · deduplicate"]
+    TOOLS["ToolRegistry + built-ins<br/>calculator · read_file · load_skill · remove_skill<br/>schema · timeout · result limit"]
+    PORTS["Core ports<br/>ConversationStore · LLMClientProvider · WorkspaceResolver"]
+
+    LOOP --> POLICY
+    LOOP --> TOOLS
+    LOOP --> PORTS
+    POLICY --> PORTS
+    TOOLS --> PORTS
   end
 
-  subgraph ADAPTERS["Adapters and Storage<br/>适配器与存储"]
-    direction TB
-    SQLITE[("SQLite<br/>事实数据源")]
-    REDIS[("Redis<br/>可选 24h 旁路缓存")]
-    SKILL_FILES[("skills/*.md<br/>frontmatter 注册表")]
-    WORKSPACE[("Workspace Files<br/>read_file 安全根目录")]
-    LLM[["OpenAI-compatible API<br/>流式工具调用"]]
+  subgraph INFRA["Outbound Adapters & Resources<br/>出站适配器与资源"]
+    direction LR
+    AGENT_STORE["AgentStoreAdapter<br/>ConversationStore implementation"]
+    SQLITE_STORE["SQLiteStore<br/>repository + cache policy"]
+    DB[("SQLite agent.db<br/>source of truth<br/>workspaces · sessions · messages · session_skills")]
+    CACHE["SideCache<br/>best-effort cache policy<br/>default TTL 24h"]
+    MEMORY[("MemoryTTLCache<br/>always available")]
+    REDIS[("RedisJSONCache<br/>optional primary")]
+    LLM_CLIENT["LLMClientFactory + OpenAICompatClient<br/>main / summary fallback"]
+    REMOTE[["OpenAI-compatible API<br/>stream + complete"]]
+    SKILL_FILES[("skills/*.md<br/>trusted model instructions")]
+    WORKSPACE[("configured workspace files<br/>read_file safe root")]
+
+    AGENT_STORE --> SQLITE_STORE
+    SQLITE_STORE --> DB
+    SQLITE_STORE -->|"cache reads + write invalidation<br/>读缓存 · 写失效"| CACHE
+    CACHE --> MEMORY
+    CACHE -.->|"optional<br/>可选"| REDIS
+    LLM_CLIENT --> REMOTE
   end
 
-  USER --> CHAT
-  WATER --- CHAT
-  CHAT --> COMPOSER
-  CHAT --> TRACE
-  CHAT ==>|"REST + typed SSE events<br/>类型化事件流"| CHAT_API
-  CHAT --> SESSION_API
-  CHAT --> SKILL_API
-  COMPOSER --> ABORT_API
+  USER --> VIEW
+  CLIENT -->|"JSON REST"| REST
+  CLIENT ==>|"POST stream / abort<br/>typed SSE response · 类型化事件流"| CHAT
+  SERVICES ==>|"AgentAdapter · stream / abort<br/>AgentEvent return"| LOOP
+  SERVICES -->|"SkillCatalogAdapter"| POLICY
 
-  CHAT_API ==> LOOP
-  ABORT_API -.-> LOOP
-  SESSION_API --> STORE_PORT
-  SKILL_API --> SKILLS
+  SERVICES -->|"session · history · loaded-skill queries"| SQLITE_STORE
+  PORTS --> AGENT_STORE
+  PORTS --> LLM_CLIENT
+  POLICY --> SKILL_FILES
+  TOOLS -->|"read_file"| WORKSPACE
+  PORTS --> WORKSPACE
 
-  LOOP --> CTX
-  LOOP --> SKILLS
-  LOOP --> TOOLS
-  LOOP --> CLIENTS
-  LOOP --> STORE_PORT
-  CTX --> CLIENTS
+  classDef actor fill:#173f3a,stroke:#173f3a,color:#ffffff,stroke-width:2px;
+  classDef browser fill:#e6eee8,stroke:#648f85,color:#173330,stroke-width:1.4px;
+  classDef application fill:#ece7d9,stroke:#8c8063,color:#2e342f,stroke-width:1.4px;
+  classDef core fill:#f0dfbd,stroke:#a57832,color:#3a2b18,stroke-width:1.5px;
+  classDef infrastructure fill:#d8e6e1,stroke:#638c83,color:#173330,stroke-width:1.4px;
 
-  STORE_PORT --> SQLITE
-  SQLITE -.->|"read cache / write invalidation<br/>读缓存 / 写失效"| REDIS
-  SKILLS --> SKILL_FILES
-  TOOLS --> WORKSPACE
-  CLIENTS --> LLM
+  class USER actor;
+  class VIEW,APP,CLIENT,VISUAL browser;
+  class ROOT,REST,CHAT,SERVICES application;
+  class LOOP,POLICY,TOOLS,PORTS core;
+  class AGENT_STORE,SQLITE_STORE,DB,CACHE,MEMORY,REDIS,LLM_CLIENT,REMOTE,SKILL_FILES,WORKSPACE infrastructure;
