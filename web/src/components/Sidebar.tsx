@@ -8,12 +8,14 @@ interface SidebarProps {
   expanded: boolean;
   loading: boolean;
   theme: Theme;
+  apiConfigured: boolean;
   onExpand: () => void;
   onNew: () => void;
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onThemeChange: (theme: Theme) => void;
+  onOpenSettings: () => void;
 }
 
 function titleInitial(title: string) {
@@ -26,12 +28,14 @@ export function Sidebar({
   expanded,
   loading,
   theme,
+  apiConfigured,
   onExpand,
   onNew,
   onSelect,
   onRename,
   onDelete,
   onThemeChange,
+  onOpenSettings,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
@@ -143,6 +147,16 @@ export function Sidebar({
       </div>
 
       <div className="sidebar-footer">
+        <button
+          className={`rail-action settings-action${apiConfigured ? "" : " settings-action--warn"}`}
+          onClick={onOpenSettings}
+          title="API 配置"
+          aria-label="打开 API 配置"
+        >
+          <span className="rail-icon"><Icon name="settings" /></span>
+          {expanded && <span>设置</span>}
+          {!apiConfigured && <span className="settings-warn-dot" aria-hidden="true" />}
+        </button>
         <button
           className="rail-action theme-toggle"
           onClick={() => onThemeChange(theme === "light" ? "dark" : "light")}

@@ -1,4 +1,12 @@
-import type { AgentEvent, ChatMessage, PublicConfig, Session, Skill } from "../types";
+import type {
+  AgentEvent,
+  ChatMessage,
+  PublicConfig,
+  Session,
+  Skill,
+  UserLLMConfig,
+  UserLLMConfigInput,
+} from "../types";
 import { parseSSEStream } from "./sse";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -95,6 +103,24 @@ export const api = {
 
   async bootstrap(): Promise<{ workspace_id: string }> {
     return request("/api/bootstrap");
+  },
+
+  getUserConfig(): Promise<UserLLMConfig> {
+    return request("/api/user/config");
+  },
+
+  putUserConfig(body: UserLLMConfigInput): Promise<UserLLMConfig> {
+    return request("/api/user/config", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  },
+
+  testUserConfig(body: UserLLMConfigInput): Promise<{ ok: boolean; detail: string }> {
+    return request("/api/user/config/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   },
 
   abortChat(sessionId: string): Promise<void> {

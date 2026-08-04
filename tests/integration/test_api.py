@@ -49,7 +49,7 @@ class FakeTitleGenerator:
     def __init__(self):
         self.calls = 0
 
-    async def generate_title(self, messages):
+    async def generate_title(self, messages, workspace_id=None):
         self.calls += 1
         return "Simple Calculation"
 
@@ -83,7 +83,7 @@ class FakeClients:
     def __init__(self, client):
         self.client = client
 
-    def get_client(self, role):
+    def get_client(self, role, workspace_id=None):
         return self.client
 
 

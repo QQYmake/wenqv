@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS session_skills (
 
 CREATE INDEX IF NOT EXISTS idx_session_skills_message
 ON session_skills(message_id);
+
+CREATE TABLE IF NOT EXISTS user_configs (
+    workspace_id TEXT PRIMARY KEY,
+    main_base_url TEXT NOT NULL DEFAULT '',
+    main_api_key_encrypted TEXT NOT NULL DEFAULT '',
+    main_model TEXT NOT NULL DEFAULT '',
+    summary_base_url TEXT NOT NULL DEFAULT '',
+    summary_api_key_encrypted TEXT NOT NULL DEFAULT '',
+    summary_model TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -212,6 +223,71 @@ class SQLiteStore:
                     connection.close()
 
             return await asyncio.to_thread(run)
+
+    async def get_user_config(
+        self, workspace_id: str
+    ) -> dict[str, str] | None:
+        """Return the raw user_configs row for a workspace (encrypted fields as-is)."""
+
+        def operation(connection: sqlite3.Connection) -> dict[str, str] | None:
+            row = connection.execute(
+                "SELECT * FROM user_configs WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+        return await self._read(operation)
+
+    async def upsert_user_config(
+        self,
+        workspace_id: str,
+        *,
+        main_base_url: str,
+        main_api_key_encrypted: str,
+        main_model: str,
+        summary_base_url: str,
+        summary_api_key_encrypted: str,
+        summary_model: str,
+    ) -> dict[str, str]:
+        """Insert or replace the user_configs row for a workspace."""
+
+        timestamp = _now()
+
+        def operation(connection: sqlite3.Connection) -> dict[str, str]:
+            connection.execute(
+                """
+                INSERT INTO user_configs(
+                    workspace_id, main_base_url, main_api_key_encrypted, main_model,
+                    summary_base_url, summary_api_key_encrypted, summary_model,
+                    updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                    main_base_url = excluded.main_base_url,
+                    main_api_key_encrypted = excluded.main_api_key_encrypted,
+                    main_model = excluded.main_model,
+                    summary_base_url = excluded.summary_base_url,
+                    summary_api_key_encrypted = excluded.summary_api_key_encrypted,
+                    summary_model = excluded.summary_model,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    workspace_id,
+                    main_base_url,
+                    main_api_key_encrypted,
+                    main_model,
+                    summary_base_url,
+                    summary_api_key_encrypted,
+                    summary_model,
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM user_configs WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+            return dict(row)
+
+        return await self._write(operation)
 
     async def close(self) -> None:
         await self.cache.close()

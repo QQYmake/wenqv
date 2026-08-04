@@ -9,10 +9,12 @@ interface ComposerProps {
   selectedSkills: Set<string>;
   streaming: boolean;
   abortEnabled?: boolean;
+  apiConfigured?: boolean;
   onChange: (value: string) => void;
   onSubmit: (value: string) => void;
   onAbort: () => void;
   onToggleSkill: (name: string, selected: boolean) => void;
+  onOpenSettings?: () => void;
 }
 
 function currentMention(value: string) {
@@ -26,10 +28,12 @@ export function Composer({
   selectedSkills,
   streaming,
   abortEnabled = true,
+  apiConfigured = true,
   onChange,
   onSubmit,
   onAbort,
   onToggleSkill,
+  onOpenSettings,
 }: ComposerProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -50,7 +54,7 @@ export function Composer({
         : [],
     [mention, mentionQuery, skills],
   );
-  const canSend = value.trim().length > 0 && !streaming;
+  const canSend = value.trim().length > 0 && !streaming && apiConfigured;
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -159,10 +163,17 @@ export function Composer({
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="请输入···"
+          placeholder={apiConfigured ? "请输入···" : "请先配置 API"}
           aria-label="消息"
           rows={1}
+          disabled={!apiConfigured}
         />
+
+        {!apiConfigured && (
+          <button type="button" className="composer-config-hint" onClick={onOpenSettings}>
+            前往设置 API →
+          </button>
+        )}
 
         <div className="composer-footer">
           <div className="composer-meta">
