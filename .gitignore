@@ -12,6 +12,7 @@ data/
 *.db-wal
 .env
 .agent_secret_key
+修改日志/
 web/node_modules/
 web/dist/
 web/coverage/
