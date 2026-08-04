@@ -13,6 +13,7 @@ const LakeBackground = lazy(() =>
 
 const THEME_KEY = "blue-lake.theme";
 const SESSION_KEY = "blue-lake.active-session";
+const WORKSPACE_KEY = "blue-lake.workspace-id";
 
 function uniqueId(prefix: string) {
   const uuid = globalThis.crypto?.randomUUID?.();
@@ -173,6 +174,25 @@ export function App({ client = api, renderWater = true }: AppProps) {
   useEffect(() => {
     let alive = true;
     const load = async () => {
+      // Issue (or refresh) the workspace identity cookie first so the
+      // AuthMiddleware has a workspace_id for every following request. The
+      // cookie is HttpOnly; we keep a non-sensitive localStorage mirror only
+      // so the UI can show which workspace is active.
+      if (typeof client.bootstrap === "function") {
+        try {
+          const { workspace_id } = await client.bootstrap();
+          if (alive) {
+            try {
+              localStorage.setItem(WORKSPACE_KEY, workspace_id);
+            } catch {
+              // Storage may be unavailable; the cookie is still the source of truth.
+            }
+          }
+        } catch {
+          // Bootstrap is best-effort; header-based identity (tests) still works.
+        }
+      }
+
       const [sessionResult, skillResult, configResult] = await Promise.allSettled([
         client.listSessions(),
         client.listSkills(),

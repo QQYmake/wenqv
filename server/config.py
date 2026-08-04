@@ -127,6 +127,7 @@ class ServerSettings:
         "http://127.0.0.1:5173",
     )
     static_dir: Path = Path("web/dist")
+    cookie_secure: bool = True
 
 
 @dataclass(slots=True)
@@ -342,6 +343,9 @@ def load_config(
             port=_integer(env.get("AGENT_PORT", server_data.get("port")), 8000),
             cors_origins=origins,
             static_dir=static_path,
+            cookie_secure=_env_bool(
+                env.get("AGENT_COOKIE_SECURE", server_data.get("cookie_secure")), True
+            ),
         ),
         workspace=WorkspaceSettings(
             default_id=_string(

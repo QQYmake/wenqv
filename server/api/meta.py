@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from .dependencies import get_services, get_workspace_id
 from .services import APIServices
@@ -31,6 +34,31 @@ async def list_skills(
 @router.get("/config")
 async def public_config(services: APIServices = Depends(get_services)) -> dict:
     return services.config.public_dict()
+
+
+@router.get("/bootstrap")
+async def bootstrap(
+    services: APIServices = Depends(get_services),
+) -> dict[str, str]:
+    """Issue a per-visitor workspace identity cookie.
+
+    The cookie is HttpOnly (JS cannot read it), Secure (HTTPS only in prod),
+    and SameSite=Lax. The frontend keeps a non-sensitive localStorage mirror so
+    the UI can show the active workspace; the cookie is the source of truth
+    for requests. Clearing browser data loses the identity.
+    """
+    workspace_id = str(uuid.uuid4())
+    await services.store.ensure_workspace(workspace_id)
+    response = JSONResponse({"workspace_id": workspace_id})
+    response.set_cookie(
+        key="workspace_id",
+        value=workspace_id,
+        httponly=True,
+        secure=services.config.server.cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    return response
 
 
 __all__ = ["router"]

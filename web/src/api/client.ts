@@ -93,6 +93,10 @@ export const api = {
     return request("/api/config");
   },
 
+  async bootstrap(): Promise<{ workspace_id: string }> {
+    return request("/api/bootstrap");
+  },
+
   abortChat(sessionId: string): Promise<void> {
     return request("/api/chat/abort", {
       method: "POST",
