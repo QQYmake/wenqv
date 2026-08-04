@@ -292,6 +292,20 @@ def _build_cipher(config: AppConfig) -> Any:
             "AGENT_SECRET_KEY is not set; using an ephemeral key. "
             "User API keys will not survive a restart. Set AGENT_SECRET_KEY in production."
         )
+    else:
+        # Fail fast when the key is present but malformed: an invalid Fernet key
+        # would otherwise 500 on the first encrypt/decrypt (e.g. a manually set
+        # AGENT_SECRET_KEY that is not 32 urlsafe base64 bytes).
+        try:
+            from cryptography.fernet import Fernet
+
+            Fernet(key_manager.require())
+        except Exception as exc:  # pragma: no cover - environment misconfiguration
+            raise EncryptionError(
+                "AGENT_SECRET_KEY is not a valid Fernet key (must be 32 url-safe "
+                "base64 bytes). Delete .agent_secret_key (or set a fresh key) and "
+                "restart via start.bat to generate a valid one."
+            ) from exc
     return FernetCipher(key_manager)
 
 

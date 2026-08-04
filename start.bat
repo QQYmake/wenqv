@@ -41,4 +41,7 @@ if "%AGENT_SECRET_KEY%"=="" (
 )
 
 echo [INFO] Starting Blue Lake Agent at http://127.0.0.1:8000
+rem AGENT_COOKIE_SECURE=false: dev runs over plain http on loopback; a
+rem "Secure" cookie would be dropped by stricter browsers there.
+set "AGENT_COOKIE_SECURE=false"
 "%PYTHON%" -m uvicorn server.main:app --reload --port 8000

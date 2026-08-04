@@ -91,6 +91,67 @@ def test_user_config_persists_and_reads_back_masked_key() -> None:
     asyncio.run(scenario())
 
 
+def test_masked_has_config_false_when_only_summary_saved() -> None:
+    """A summary-only row does not unlock chat: has_config tracks main."""
+
+    import asyncio
+
+    async def scenario():
+        store = SQLiteStore(":memory:")
+        await store.initialize()
+        repo = UserConfigRepository(store, _cipher())
+        await repo.upsert(
+            "ws-summary-only",
+            main={"base_url": "", "api_key": "", "model": ""},
+            summary={
+                "base_url": "https://summary.example.com/v1",
+                "api_key": "sk-summary-1",
+                "model": "summary-model",
+            },
+        )
+        masked = await repo.get_masked("ws-summary-only")
+        assert masked["has_config"] is False
+        assert masked["summary"]["api_key"] == "sk-***y-1"
+        resolved = await repo.get_resolved("ws-summary-only", LLMSettings())
+        assert resolved.is_complete("main") is False
+        assert resolved.is_complete("summary") is True
+        await store.close()
+
+    asyncio.run(scenario())
+
+
+def test_undecryptable_stored_key_is_treated_as_empty() -> None:
+    """After a secret rotation, stale ciphertext must not 500; it reads as empty."""
+
+    import asyncio
+
+    async def scenario():
+        store = SQLiteStore(":memory:")
+        await store.initialize()
+        repo = UserConfigRepository(store, _cipher())
+        await repo.upsert(
+            "ws-stale",
+            main={
+                "base_url": "https://api.example.com/v1",
+                "api_key": "sk-stale-key-123456",
+                "model": "gpt-test",
+            },
+            summary={"base_url": "", "api_key": "", "model": ""},
+        )
+
+        # A fresh key (e.g. after restart with a new secret) cannot decrypt.
+        rotated = UserConfigRepository(store, _cipher())
+        masked = await rotated.get_masked("ws-stale")
+        assert masked["has_config"] is False
+        assert masked["main"]["api_key"] == ""
+        resolved = await rotated.get_resolved("ws-stale", LLMSettings())
+        assert resolved.main_api_key == ""
+        assert resolved.is_complete("main") is False
+        await store.close()
+
+    asyncio.run(scenario())
+
+
 def test_user_config_empty_api_key_keeps_stored_key() -> None:
     import asyncio
 

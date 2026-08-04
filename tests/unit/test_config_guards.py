@@ -66,6 +66,17 @@ def test_build_cipher_uses_env_secret_when_required(
     assert cipher.decrypt(cipher.encrypt("sk-x")) == "sk-x"
 
 
+def test_build_cipher_fails_fast_on_malformed_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manually set non-Fernet key must fail at startup, not 500 on first save."""
+    monkeypatch.setenv("AGENT_SECRET_KEY", "not-a-valid-fernet-key")
+    config = load_config(Path("does-not-exist.yaml"), environ={})
+    config.llm.require_user_config = True  # type: ignore[misc]
+    with pytest.raises(EncryptionError, match="valid Fernet key"):
+        _build_cipher(config)
+
+
 def test_module_app_attribute_resolves_lazily_and_is_never_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

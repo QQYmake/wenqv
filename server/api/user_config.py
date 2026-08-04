@@ -62,10 +62,13 @@ async def test_user_config(
     workspace_id: str = Depends(get_workspace_id),
     services: APIServices = Depends(get_services),
 ) -> dict[str, Any]:
-    """Validate the submitted config by issuing one tiny completion request.
+    """Validate the submitted config by issuing one tiny completion request
+    for every role that ends up complete (submitted or previously saved).
 
-    The submitted body is used as-is (not persisted). A non-empty ``api_key``
-    overrides any stored key; an empty one falls back to the stored/default key.
+    Main and summary are probed independently, so a summary-only config can be
+    tested without filling the main model first. The submitted body is used
+    as-is (not persisted); a non-empty ``api_key`` overrides any stored key,
+    and an empty one falls back to the stored/default key.
     """
 
     resolver = services.client_resolver
@@ -83,20 +86,49 @@ async def test_user_config(
         resolved.summary_model,
         body.summary,
     )
-    if not (main["base_url"] and main["api_key"] and main["model"]):
-        raise HTTPException(status_code=422, detail="API 配置不完整")
+
+    probes: dict[str, dict[str, Any]] = {}
+    if _complete(main):
+        probes["main"] = await _probe(resolver, main)
+    if _complete(summary):
+        probes["summary"] = await _probe(resolver, summary)
+    if not probes:
+        raise HTTPException(
+            status_code=422,
+            detail="请至少填写一个完整的模型配置（base_url、api_key、model）",
+        )
+
+    failed = [f"{role}: {probe['detail']}" for role, probe in probes.items() if not probe["ok"]]
+    ok = not failed
+    notes = []
+    if not _complete(main):
+        notes.append("主模型未配置，配置完成后才能开始对话")
+    if not _complete(summary):
+        notes.append("摘要模型未配置（可选，将复用主模型）")
+    if ok:
+        detail = "连接成功"
+    else:
+        detail = "；".join(failed)
+    if notes:
+        detail = f"{detail}（{'；'.join(notes)}）"
+    return {"ok": ok, "detail": detail, "roles": probes}
+
+
+def _complete(role: dict[str, str]) -> bool:
+    return bool(role["base_url"] and role["api_key"] and role["model"])
+
+
+async def _probe(resolver: Any, role: dict[str, str]) -> dict[str, Any]:
+    from server.agent.models import ChatMessage
 
     try:
         client = resolver.build_client(
-            base_url=main["base_url"],
-            api_key=main["api_key"],
-            model=main["model"],
+            base_url=role["base_url"],
+            api_key=role["api_key"],
+            model=role["model"],
         )
     except Exception as exc:  # build error (bad config)
-        return {"ok": False, "detail": str(exc)}
-
-    from server.agent.models import ChatMessage
-
+        return {"ok": False, "detail": str(exc) or exc.__class__.__name__}
     try:
         response = await client.complete(
             [ChatMessage(role="user", content="ping")], tools=None, max_tokens=1

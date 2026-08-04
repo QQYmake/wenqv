@@ -63,6 +63,16 @@ def test_bootstrap_sets_httponly_secure_cookie(tmp_path: Path) -> None:
     assert "Path=/" in set_cookie
 
 
+def test_bootstrap_reuses_existing_workspace_identity(tmp_path: Path) -> None:
+    """A reload must not mint a new workspace: the saved config stays visible."""
+    app = create_app(_config(tmp_path, cookie_secure=False), agent=FakeAgent())
+    with TestClient(app) as client:
+        first = client.get("/api/bootstrap")
+        second = client.get("/api/bootstrap")
+        assert first.status_code == 200 and second.status_code == 200
+        assert second.json()["workspace_id"] == first.json()["workspace_id"]
+
+
 def test_bootstrap_then_chat_flow_end_to_end(tmp_path: Path) -> None:
     app = create_app(_config(tmp_path, cookie_secure=False), agent=FakeAgent())
     with TestClient(app) as client:
