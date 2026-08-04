@@ -202,35 +202,37 @@ export function Composer({
 
             {settingsOpen && (
               <div className="settings-popover" role="dialog" aria-label="聊天设置">
-                <div className="settings-heading">
-                  <div>
-                    <span className="eyebrow">CONTEXT</span>
-                    <h3>Skills</h3>
+                <div className="settings-popover__inner">
+                  <div className="settings-heading">
+                    <div>
+                      <span className="eyebrow">CONTEXT</span>
+                      <h3>Skills</h3>
+                    </div>
+                    <span>{selectedSkills.size} 已选</span>
                   </div>
-                  <span>{selectedSkills.size} 已选</span>
-                </div>
-                <p className="settings-intro">选择后将在下一轮载入本会话；也可直接输入 @。</p>
-                <div className="skill-options">
-                  {skills.length === 0 && <p className="empty-skills">暂无可用 Skill</p>}
-                  {skills.map((skill) => {
-                    const checked = selectedSkills.has(skill.name);
-                    return (
-                      <label className="skill-option" key={skill.name}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(event) => onToggleSkill(skill.name, event.target.checked)}
-                        />
-                        <span className="custom-checkbox" aria-hidden="true">
-                          {checked && <Icon name="check" />}
-                        </span>
-                        <span>
-                          <strong>{skill.name}</strong>
-                          <small>{skill.description}</small>
-                        </span>
-                      </label>
-                    );
-                  })}
+                  <p className="settings-intro">选择后将在下一轮载入本会话；也可直接输入 @。</p>
+                  <div className="skill-options">
+                    {skills.length === 0 && <p className="empty-skills">暂无可用 Skill</p>}
+                    {skills.map((skill) => {
+                      const checked = selectedSkills.has(skill.name);
+                      return (
+                        <label className="skill-option" key={skill.name}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) => onToggleSkill(skill.name, event.target.checked)}
+                          />
+                          <span className="custom-checkbox" aria-hidden="true">
+                            {checked && <Icon name="check" />}
+                          </span>
+                          <span>
+                            <strong>{skill.name}</strong>
+                            <small>{skill.description}</small>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             )}

@@ -21,14 +21,16 @@ const suggestions = [
 export function Welcome({ onSuggestion }: { onSuggestion: (prompt: string) => void }) {
   return (
     <section className="welcome" aria-labelledby="welcome-title">
-      <div className="welcome-orbit" aria-hidden="true">
-        <span className="welcome-sun" />
-        <span className="welcome-ripple welcome-ripple--one" />
-        <span className="welcome-ripple welcome-ripple--two" />
+      <div className="welcome-copy">
+        <div className="welcome-orbit" aria-hidden="true">
+          <span className="welcome-sun" />
+          <span className="welcome-ripple welcome-ripple--one" />
+          <span className="welcome-ripple welcome-ripple--two" />
+        </div>
+        <p className="welcome-kicker">A QUIET PLACE TO THINK</p>
+        <h1 id="welcome-title">今天，我们从哪里开始？</h1>
+        <p className="welcome-subtitle">把问题放在这里。工具、Skills 与上下文会在需要时自然加入。</p>
       </div>
-      <p className="welcome-kicker">A QUIET PLACE TO THINK</p>
-      <h1 id="welcome-title">今天，我们从哪里开始？</h1>
-      <p className="welcome-subtitle">把问题放在这里。工具、Skills 与上下文会在需要时自然加入。</p>
 
       <div className="suggestion-grid" aria-label="建议开场">
         {suggestions.map((suggestion, index) => (
@@ -39,12 +41,17 @@ export function Welcome({ onSuggestion }: { onSuggestion: (prompt: string) => vo
             key={suggestion.label}
             onClick={() => onSuggestion(suggestion.prompt)}
           >
-            <span className="suggestion-icon"><Icon name={index === 1 ? "leaf" : "spark"} /></span>
-            <span className="suggestion-copy">
-              <strong>{suggestion.label}</strong>
-              <small>{suggestion.description}</small>
+            <span className="suggestion-card__inner">
+              <span className="suggestion-icon"><Icon name={index === 1 ? "leaf" : "spark"} /></span>
+              <span className="suggestion-copy">
+                <span className="suggestion-index" aria-hidden="true">0{index + 1}</span>
+                <strong>{suggestion.label}</strong>
+                <small>{suggestion.description}</small>
+              </span>
+              <span className="suggestion-arrow-wrap" aria-hidden="true">
+                <Icon className="suggestion-arrow" name="chevron" />
+              </span>
             </span>
-            <Icon className="suggestion-arrow" name="chevron" />
           </button>
         ))}
       </div>
