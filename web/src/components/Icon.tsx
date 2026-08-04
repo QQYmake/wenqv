@@ -24,7 +24,7 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
   const common = {
     fill: "none",
     stroke: "currentColor",
-    strokeWidth: 1.7,
+    strokeWidth: 1.45,
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
   };

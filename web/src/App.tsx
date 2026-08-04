@@ -211,7 +211,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
     document.documentElement.style.colorScheme = theme;
     document.querySelector('meta[name="theme-color"]')?.setAttribute(
       "content",
-      theme === "light" ? "#edf3ee" : "#071a22",
+      theme === "light" ? "#ede9dc" : "#061614",
     );
     try {
       localStorage.setItem(THEME_KEY, theme);

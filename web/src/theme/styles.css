@@ -2,50 +2,60 @@
 
 :root {
   font-family: "LXGW WenKai Lite", "LXGW WenKai", "Kaiti SC", serif;
-  color: #183036;
-  background: #b7d8d6;
+  color: #173330;
+  background: #a9cbc6;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --rail-width: 68px;
-  --sidebar-width: 286px;
-  --ink: #183036;
-  --ink-soft: #586b68;
-  --ink-faint: #7b8c86;
-  --surface: #edf2e9;
-  --surface-strong: #f5f4ea;
-  --surface-soft: rgba(231, 239, 231, 0.88);
-  --surface-muted: #dce8df;
-  --surface-hover: #e2e9de;
-  --blue: #246b7d;
-  --blue-deep: #174d5c;
-  --blue-soft: #c7dedc;
-  --sun: #e3a949;
-  --sun-soft: #f4dfad;
-  --danger: #9d493e;
-  --shadow: 0 20px 55px rgba(22, 54, 58, 0.13), 0 2px 8px rgba(22, 54, 58, 0.06);
-  --shadow-soft: 0 10px 30px rgba(29, 61, 61, 0.08);
+  --rail-width: 72px;
+  --sidebar-width: 300px;
+  --ink: #173330;
+  --ink-soft: #465f59;
+  --ink-faint: #536c65;
+  --surface: #ede9dc;
+  --surface-strong: #f8f5ea;
+  --surface-soft: rgba(238, 235, 222, 0.95);
+  --surface-muted: #e3e6d9;
+  --surface-hover: #dbe4da;
+  --blue: #246e70;
+  --blue-deep: #15575b;
+  --blue-soft: #c8ded7;
+  --sun: #b77a2d;
+  --sun-soft: #efd9aa;
+  --danger: #98483f;
+  --focus: #0f6266;
+  --edge: rgba(33, 76, 71, 0.13);
+  --edge-highlight: rgba(255, 253, 244, 0.72);
+  --shadow: 0 28px 74px rgba(21, 63, 58, 0.14), 0 5px 18px rgba(21, 63, 58, 0.07);
+  --shadow-soft: 0 16px 44px rgba(21, 63, 58, 0.1), 0 2px 8px rgba(21, 63, 58, 0.05);
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-heavy: cubic-bezier(0.32, 0.72, 0, 1);
+  --radius-shell: 32px;
+  --radius-panel: 25px;
 }
 
 :root[data-theme="dark"] {
-  color: #dce9e2;
-  background: #071a22;
-  --ink: #dce9e2;
-  --ink-soft: #a0b6b1;
-  --ink-faint: #718b88;
-  --surface: #10272d;
-  --surface-strong: #173238;
-  --surface-soft: rgba(14, 38, 44, 0.9);
-  --surface-muted: #18363c;
-  --surface-hover: #1b3940;
-  --blue: #73adb4;
-  --blue-deep: #8bc0c2;
-  --blue-soft: #23484e;
-  --sun: #edc779;
-  --sun-soft: #594b2e;
-  --danger: #e19082;
-  --shadow: 0 22px 58px rgba(0, 7, 10, 0.38), 0 2px 8px rgba(0, 7, 10, 0.2);
-  --shadow-soft: 0 10px 30px rgba(0, 7, 10, 0.22);
+  color: #e2ebe4;
+  background: #061614;
+  --ink: #e2ebe4;
+  --ink-soft: #b0c1b9;
+  --ink-faint: #93aaa1;
+  --surface: #0a201f;
+  --surface-strong: #132d2a;
+  --surface-soft: rgba(8, 29, 28, 0.96);
+  --surface-muted: #183633;
+  --surface-hover: #1d3e39;
+  --blue: #79b8b2;
+  --blue-deep: #9bcac0;
+  --blue-soft: #234a45;
+  --sun: #e8bd73;
+  --sun-soft: #59472c;
+  --danger: #e59a8e;
+  --focus: #e8bd73;
+  --edge: rgba(188, 220, 208, 0.15);
+  --edge-highlight: rgba(224, 240, 231, 0.12);
+  --shadow: 0 30px 80px rgba(0, 9, 8, 0.46), 0 5px 18px rgba(0, 9, 8, 0.28);
+  --shadow-soft: 0 16px 44px rgba(0, 9, 8, 0.34), 0 2px 8px rgba(0, 9, 8, 0.2);
 }
 
 * {
@@ -65,6 +75,7 @@ body {
   min-width: 320px;
   color: var(--ink);
   background: var(--surface);
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -75,6 +86,10 @@ input {
 
 button {
   color: inherit;
+}
+
+button:not(:disabled) {
+  transition-timing-function: var(--ease-heavy);
 }
 
 button,
@@ -88,7 +103,7 @@ textarea:focus-visible,
 input:focus-visible,
 summary:focus-visible,
 a:focus-visible {
-  outline: 2px solid var(--sun);
+  outline: 2px solid var(--focus);
   outline-offset: 3px;
 }
 
@@ -121,11 +136,11 @@ a:focus-visible {
   inset: 0;
   z-index: -3;
   overflow: hidden;
-  background: #78b3c2;
+  background: #76aaa7;
 }
 
 [data-theme="dark"] .lake-background {
-  background: #071a22;
+  background: #061614;
 }
 
 .lake-background--static {
@@ -154,36 +169,47 @@ a:focus-visible {
   z-index: -2;
   pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(246, 245, 232, 0.2), transparent 24%, transparent 76%, rgba(238, 241, 225, 0.12)),
-    radial-gradient(circle at 66% -10%, rgba(255, 237, 180, 0.2), transparent 38%);
+    linear-gradient(90deg, rgba(248, 240, 215, 0.18), transparent 22%, transparent 74%, rgba(228, 238, 220, 0.13)),
+    radial-gradient(circle at 68% -8%, rgba(240, 206, 141, 0.22), transparent 36%);
 }
 
 [data-theme="dark"] .atmosphere {
   background:
-    linear-gradient(90deg, rgba(3, 17, 22, 0.18), transparent 28%, transparent 72%, rgba(2, 13, 18, 0.16)),
-    radial-gradient(circle at 66% -10%, rgba(145, 192, 187, 0.08), transparent 38%);
+    linear-gradient(90deg, rgba(2, 14, 13, 0.22), transparent 28%, transparent 72%, rgba(1, 11, 10, 0.2)),
+    radial-gradient(circle at 68% -8%, rgba(184, 154, 94, 0.09), transparent 36%);
 }
 
 /* Sidebar */
 .sidebar {
   position: fixed;
-  inset: 10px auto 10px 10px;
+  inset: 18px auto 18px 18px;
   z-index: 50;
   display: grid;
-  grid-template-rows: 58px auto minmax(0, 1fr) auto;
+  grid-template-rows: 64px auto minmax(0, 1fr) auto;
   width: var(--rail-width);
-  padding: 6px 7px;
+  padding: 8px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--surface) 93%, transparent);
-  border-radius: 22px;
+  border: 1px solid var(--edge);
+  border-radius: 28px;
+  background: color-mix(in srgb, var(--surface-soft) 90%, transparent);
   box-shadow: var(--shadow-soft);
-  backdrop-filter: blur(18px) saturate(0.9);
-  transition: width 420ms var(--ease), box-shadow 300ms ease;
+  backdrop-filter: blur(20px) saturate(0.82);
+  transition: width 520ms var(--ease-heavy), box-shadow 520ms var(--ease);
+}
+
+.sidebar::after {
+  position: absolute;
+  inset: 5px;
+  z-index: 0;
+  content: attr(data-bezel);
+  pointer-events: none;
+  border: 1px solid var(--edge-highlight);
+  border-radius: 22px;
 }
 
 .sidebar--expanded {
   width: var(--sidebar-width);
-  padding-inline: 10px;
+  padding-inline: 11px;
   box-shadow: var(--shadow);
 }
 
@@ -206,12 +232,13 @@ a:focus-visible {
 }
 
 .sidebar-logo {
-  width: 43px;
-  height: 43px;
-  margin: 2px auto 0;
+  width: 46px;
+  height: 46px;
+  margin: 1px auto 0;
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: 17px;
   background: var(--blue-deep);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 8px 22px color-mix(in srgb, var(--blue-deep) 22%, transparent);
 }
 
 .logo-sun {
@@ -248,16 +275,17 @@ a:focus-visible {
   display: flex;
   align-items: center;
   width: 100%;
-  min-height: 43px;
+  min-height: 46px;
   gap: 12px;
   padding: 0 6px;
   white-space: nowrap;
   border: 0;
-  border-radius: 14px;
+  border-radius: 15px;
   background: transparent;
   color: var(--ink-soft);
   font-size: 15px;
   cursor: pointer;
+  transition: color 420ms var(--ease), background-color 420ms var(--ease), transform 520ms var(--ease-spring);
 }
 
 .rail-action:hover {
@@ -265,17 +293,22 @@ a:focus-visible {
   background: var(--surface-hover);
 }
 
+.rail-action:active {
+  transform: scale(0.975);
+}
+
 .rail-icon {
   display: grid;
-  flex: 0 0 42px;
-  width: 42px;
-  height: 42px;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
   place-items: center;
 }
 
 .new-chat-action {
   color: var(--blue-deep);
   background: var(--blue-soft);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 45%, transparent);
 }
 
 .new-chat-action:hover {
@@ -309,9 +342,10 @@ a:focus-visible {
   position: relative;
   display: flex;
   align-items: center;
-  min-height: 43px;
+  min-height: 46px;
   margin: 2px 0;
-  border-radius: 13px;
+  border-radius: 15px;
+  transition: background-color 420ms var(--ease), transform 520ms var(--ease-spring);
 }
 
 .session-row:hover,
@@ -334,7 +368,7 @@ a:focus-visible {
   align-items: center;
   min-width: 0;
   width: 100%;
-  height: 43px;
+  height: 46px;
   padding: 0 12px;
   overflow: hidden;
   border: 0;
@@ -377,7 +411,7 @@ a:focus-visible {
   padding-left: 12px;
   opacity: 0;
   background: linear-gradient(90deg, transparent, var(--surface-hover) 20%);
-  transition: opacity 160ms ease;
+  transition: opacity 380ms var(--ease);
 }
 
 .session-row:hover .session-actions,
@@ -431,6 +465,7 @@ a:focus-visible {
 
 .theme-toggle {
   background: var(--surface-muted);
+  box-shadow: inset 0 1px 0 var(--edge-highlight);
 }
 
 .sidebar-scrim {
@@ -445,18 +480,28 @@ a:focus-visible {
 /* Main workspace */
 .workspace {
   position: relative;
-  width: calc(100% - 88px);
-  height: calc(100% - 20px);
-  margin: 10px 10px 10px 88px;
+  width: calc(100% - 112px);
+  height: calc(100% - 36px);
+  margin: 18px 18px 18px 94px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--surface-soft) 62%, transparent);
-  border-radius: 26px;
-  box-shadow: 0 1px 1px rgba(255, 255, 255, 0.25), var(--shadow-soft);
-  backdrop-filter: blur(6px) saturate(0.94);
+  border: 6px solid color-mix(in srgb, var(--surface) 46%, transparent);
+  border-radius: var(--radius-shell);
+  background: var(--surface-soft);
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 1px 0 color-mix(in srgb, white 24%, transparent), var(--shadow-soft);
 }
 
 [data-theme="dark"] .workspace {
-  background: color-mix(in srgb, var(--surface-soft) 68%, transparent);
+  background: var(--surface-soft);
+}
+
+.workspace::after {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  content: "";
+  pointer-events: none;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-panel);
 }
 
 .workspace-header {
@@ -464,19 +509,29 @@ a:focus-visible {
   z-index: 5;
   display: flex;
   align-items: center;
-  height: 58px;
-  padding: 0 22px;
+  height: 68px;
+  padding: 0 26px;
+}
+
+.workspace-header::after {
+  position: absolute;
+  right: 24px;
+  bottom: 0;
+  left: 24px;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, transparent, var(--edge) 18%, var(--edge) 82%, transparent);
 }
 
 .mobile-menu {
   display: none;
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   margin-right: 8px;
   padding: 0;
   place-items: center;
   border: 0;
-  border-radius: 12px;
+  border-radius: 14px;
   background: transparent;
   cursor: pointer;
 }
@@ -485,9 +540,9 @@ a:focus-visible {
   display: flex;
   align-items: center;
   min-width: 0;
-  gap: 12px;
+  gap: 14px;
   color: var(--ink-soft);
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .header-title > span {
@@ -510,22 +565,22 @@ a:focus-visible {
   background: var(--sun);
   border-radius: 50%;
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--sun) 18%, transparent);
-  animation: working-pulse 1.8s ease-in-out infinite;
+  animation: working-pulse 1.8s var(--ease-heavy) infinite;
 }
 
 .header-watermark {
   margin-left: auto;
   color: var(--ink-faint);
   font-family: ui-monospace, "Cascadia Mono", monospace;
-  font-size: 9px;
-  letter-spacing: 0.23em;
-  opacity: 0.7;
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  opacity: 0.78;
 }
 
 .conversation-stage {
   position: relative;
-  height: calc(100% - 58px);
-  padding-inline: 16px;
+  height: calc(100% - 68px);
+  padding-inline: 20px;
 }
 
 .workspace--welcome .conversation-stage {
