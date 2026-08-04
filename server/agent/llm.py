@@ -117,7 +117,9 @@ class OpenAICompatClient:
                 from openai import AsyncOpenAI
             except ImportError as exc:  # pragma: no cover - integration guard
                 raise RuntimeError(
-                    "The 'openai' package is required for OpenAICompatClient"
+                    "The 'openai' package is required for OpenAICompatClient. "
+                    "Activate the project virtualenv (.venv) and run: "
+                    "python -m pip install -r requirements.txt, then restart the server."
                 ) from exc
             self._sdk_client = AsyncOpenAI(
                 base_url=self.config.base_url,
