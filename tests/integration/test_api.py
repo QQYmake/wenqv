@@ -112,7 +112,7 @@ def event_payloads(response) -> list[dict]:
 
 def test_session_crud_and_workspace_isolation():
     app = create_app(make_config(), agent=FakeAgent())
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Workspace-ID": "default"}) as client:
         created = client.post("/api/sessions", json={"title": "Planning"})
         assert created.status_code == 201
         session = created.json()
@@ -138,7 +138,7 @@ def test_chat_sse_has_named_events_and_persists_history():
         skill_manager=FakeSkills(),
         title_generator=title_generator,
     )
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Workspace-ID": "default"}) as client:
         session = client.post("/api/sessions", json={}).json()
         with client.stream(
             "POST",
@@ -173,7 +173,7 @@ def test_chat_sse_has_named_events_and_persists_history():
 def test_skills_config_and_abort_are_safe():
     agent = FakeAgent()
     app = create_app(make_config(), agent=agent, skill_manager=FakeSkills())
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Workspace-ID": "default"}) as client:
         session = client.post("/api/sessions", json={}).json()
         assert client.get("/api/skills").json() == {
             "skills": [{"name": "demo", "description": "Demo workflow"}]
@@ -248,7 +248,7 @@ def test_real_agent_core_completes_two_tool_turns_over_sse():
         skill_manager=skills,
         title_generator=FakeTitleGenerator(),
     )
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-Workspace-ID": "default"}) as client:
         session = client.post("/api/sessions", json={}).json()
         with client.stream(
             "POST",
