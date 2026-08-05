@@ -86,24 +86,37 @@ async def test_user_config(
     if not (main["base_url"] and main["api_key"] and main["model"]):
         raise HTTPException(status_code=422, detail="API 配置不完整")
 
-    try:
-        client = resolver.build_client(
-            base_url=main["base_url"],
-            api_key=main["api_key"],
-            model=main["model"],
-        )
-    except Exception as exc:  # build error (bad config)
-        return {"ok": False, "detail": str(exc)}
-
     from server.agent.models import ChatMessage
 
-    try:
-        response = await client.complete(
-            [ChatMessage(role="user", content="ping")], tools=None, max_tokens=1
-        )
-        return {"ok": True, "detail": (response.content or "")[:80]}
-    except Exception as exc:
-        return {"ok": False, "detail": str(exc) or exc.__class__.__name__}
+    # Probe each role independently with its own client so a broken summary
+    # provider is reported even when main is healthy (and vice versa).
+    results: dict[str, Any] = {}
+    for role, fields in (("main", main), ("summary", summary)):
+        if not (fields["base_url"] and fields["api_key"] and fields["model"]):
+            results[role] = {"ok": False, "detail": "API 配置不完整"}
+            continue
+        try:
+            client = resolver.build_client(
+                base_url=fields["base_url"],
+                api_key=fields["api_key"],
+                model=fields["model"],
+            )
+        except Exception as exc:  # build error (bad config)
+            results[role] = {"ok": False, "detail": str(exc)}
+            continue
+        try:
+            response = await client.complete(
+                [ChatMessage(role="user", content="ping")], tools=None, max_tokens=1
+            )
+            results[role] = {"ok": True, "detail": (response.content or "")[:80]}
+        except Exception as exc:
+            results[role] = {"ok": False, "detail": str(exc) or exc.__class__.__name__}
+
+    ok = all(result["ok"] for result in results.values())
+    detail = "；".join(
+        f"{role}: {result['detail']}" for role, result in results.items() if not result["ok"]
+    ) or (results.get("main", {}).get("detail") or "ok")
+    return {"ok": ok, "detail": detail, "roles": results}
 
 
 def _overlay(base_url: str, api_key: str, model: str, body: ProviderConfigBody) -> dict[str, str]:

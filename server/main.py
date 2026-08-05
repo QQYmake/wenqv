@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from server.storage import (
     SQLiteStore,
     build_side_cache,
 )
+from server.storage.encryption import EncryptionError
 
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,21 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @app.exception_handler(EncryptionError)
+    async def _encryption_error_handler(request: Request, exc: EncryptionError) -> JSONResponse:
+        """A wrong/missing AGENT_SECRET_KEY must fail with a clear, key-free error.
+
+        The stored ciphertext is unreadable (e.g. the key changed between
+        restarts). We never echo the exception or any key material to the client.
+        """
+
+        logger.warning("User config decryption failed; AGENT_SECRET_KEY may have changed")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "用户配置解密失败：请检查服务端 AGENT_SECRET_KEY"},
+        )
+
     app.state.services = services
     # Order matters: the last add_middleware call becomes the outermost layer.
     # CORS must run first so preflights are answered and credentials are

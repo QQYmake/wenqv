@@ -53,6 +53,25 @@ class ResolverCapturingAgent:
         return False
 
 
+class ResolverRecordingAgent:
+    """FakeAgent that records (workspace_id, selected client) per turn."""
+
+    persists_messages = False
+
+    def __init__(self, resolver):
+        self.resolver = resolver
+        self.captured = []
+
+    async def stream(self, **kwargs):
+        ws = kwargs.get("workspace_id")
+        self.captured.append((ws, self.resolver.get_client("main", ws)))
+        yield {"type": "text_delta", "delta": "ok"}
+        yield {"type": "done", "finish_reason": "stop"}
+
+    async def abort(self, *_a, **_k):
+        return False
+
+
 class FakeClient:
     def __init__(self, base_url, api_key, model):
         self.base_url = base_url
@@ -228,3 +247,269 @@ def _make_store(path=None):
     if path is None:
         return SQLiteStore(":memory:")
     return SQLiteStore(path)
+
+
+def _default_llm() -> LLMSettings:
+    return LLMSettings(
+        main=LLMProviderConfig(
+            base_url="https://default.example.com/v1",
+            api_key="sk-default",
+            model="default-model",
+        )
+    )
+
+
+def test_get_config_never_returns_plaintext_for_configured_workspace(tmp_path: Path) -> None:
+    store = _make_store()
+    resolver, repo = _resolver(store, _default_llm())
+    app = create_app(
+        _config(tmp_path, default_llm=_default_llm()),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=FakeAgent(),
+    )
+    with TestClient(app, headers={"X-Workspace-ID": "ws-get"}) as client:
+        client.put("/api/user/config", json=_client_config())
+        response = client.get("/api/user/config")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["has_config"] is True
+        assert body["main"]["api_key"] == "sk-***345"
+        assert body["summary"]["api_key"] == ""
+        assert "sk-user-secret" not in response.text
+
+
+def test_masked_roundtrip_keeps_stored_key(tmp_path: Path) -> None:
+    default_llm = _default_llm()
+    store = _make_store()
+    resolver, repo = _resolver(store, default_llm)
+    agent = ResolverCapturingAgent(resolver)
+    app = create_app(
+        _config(tmp_path, default_llm=default_llm),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=agent,
+    )
+    with TestClient(app, headers={"X-Workspace-ID": "ws-roundtrip"}) as client:
+        client.put("/api/user/config", json=_client_config())
+        masked = client.get("/api/user/config").json()
+        assert masked["main"]["api_key"] == "sk-***345"
+        # Re-save with an empty api_key — exactly what the Settings UI sends
+        # after a masked round-trip — the stored key must survive.
+        roundtrip = {
+            "main": {"base_url": masked["main"]["base_url"], "api_key": "", "model": masked["main"]["model"]},
+            "summary": {"base_url": "", "api_key": "", "model": ""},
+        }
+        saved = client.put("/api/user/config", json=roundtrip).json()
+        assert saved["main"]["api_key"] == "sk-***345"
+        session = client.post("/api/sessions", json={}).json()
+        with client.stream(
+            "POST", "/api/chat",
+            json={"session_id": session["id"], "message": "hi"},
+        ) as response:
+            assert response.status_code == 200
+        assert agent.captured is not None
+        assert agent.captured.api_key == "sk-user-secret-12345"
+
+
+def test_user_config_isolated_per_workspace(tmp_path: Path) -> None:
+    default_llm = _default_llm()
+    store = _make_store()
+    resolver, repo = _resolver(store, default_llm)
+    agent = ResolverRecordingAgent(resolver)
+    app = create_app(
+        _config(tmp_path, default_llm=default_llm),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=agent,
+    )
+    with TestClient(app) as client:
+        # Workspace A gets a user config.
+        put = client.put("/api/user/config", json=_client_config(), headers={"X-Workspace-ID": "ws-a"})
+        assert put.status_code == 200
+        session_a = client.post("/api/sessions", json={}, headers={"X-Workspace-ID": "ws-a"}).json()
+        with client.stream(
+            "POST", "/api/chat",
+            json={"session_id": session_a["id"], "message": "hi"},
+            headers={"X-Workspace-ID": "ws-a"},
+        ) as response:
+            assert response.status_code == 200
+        # Workspace B sees no user config and falls back to the default.
+        empty = client.get("/api/user/config", headers={"X-Workspace-ID": "ws-b"}).json()
+        assert empty["has_config"] is False
+        assert empty["main"]["api_key"] == ""
+        assert empty["summary"]["api_key"] == ""
+        session_b = client.post("/api/sessions", json={}, headers={"X-Workspace-ID": "ws-b"}).json()
+        with client.stream(
+            "POST", "/api/chat",
+            json={"session_id": session_b["id"], "message": "hi"},
+            headers={"X-Workspace-ID": "ws-b"},
+        ) as response:
+            assert response.status_code == 200
+
+    assert [(ws, client.api_key) for ws, client in agent.captured] == [
+        ("ws-a", "sk-user-secret-12345"),
+        ("ws-b", "sk-default"),
+    ]
+
+
+def test_put_invalidates_resolver_cache(tmp_path: Path) -> None:
+    default_llm = _default_llm()
+    store = _make_store()
+    resolver, repo = _resolver(store, default_llm)
+    agent = ResolverRecordingAgent(resolver)
+    app = create_app(
+        _config(tmp_path, default_llm=default_llm),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=agent,
+    )
+    with TestClient(app, headers={"X-Workspace-ID": "ws-cache"}) as client:
+        client.put("/api/user/config", json=_client_config())
+        session = client.post("/api/sessions", json={}).json()
+        with client.stream(
+            "POST", "/api/chat",
+            json={"session_id": session["id"], "message": "hi"},
+        ) as response:
+            assert response.status_code == 200
+        assert agent.captured[-1][1].api_key == "sk-user-secret-12345"
+        # PUT a changed config; the very next chat must resolve the new values.
+        updated = {
+            "main": {"base_url": "https://api.example.com/v1", "api_key": "sk-new-key-987654", "model": "gpt-test"},
+            "summary": {"base_url": "", "api_key": "", "model": ""},
+        }
+        client.put("/api/user/config", json=updated)
+        with client.stream(
+            "POST", "/api/chat",
+            json={"session_id": session["id"], "message": "hi"},
+        ) as response:
+            assert response.status_code == 200
+        assert agent.captured[-1][1].api_key == "sk-new-key-987654"
+        assert agent.captured[-1][1].model == "gpt-test"
+
+
+def test_test_endpoint_probes_each_role_independently(tmp_path: Path) -> None:
+    default_llm = _default_llm()
+    store = _make_store()
+
+    def builder(provider):
+        if provider.api_key == "sk-bad-summary":
+            raise RuntimeError("summary provider rejected")
+        return FakeClient(provider.base_url, provider.api_key, provider.model)
+
+    resolver, repo = _resolver(store, default_llm, builder=builder)
+    app = create_app(
+        _config(tmp_path, default_llm=default_llm),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=FakeAgent(),
+    )
+    body = {
+        "main": {"base_url": "https://api.example.com/v1", "api_key": "sk-user-secret-12345", "model": "gpt-test"},
+        "summary": {"base_url": "https://summary.example.com/v1", "api_key": "sk-bad-summary", "model": "summary-model"},
+    }
+    with TestClient(app, headers={"X-Workspace-ID": "ws-probe"}) as client:
+        response = client.post("/api/user/config/test", json=body)
+        assert response.status_code == 200
+        payload = response.json()
+        # Main succeeds but the summary role fails: the endpoint must report it.
+        assert payload["ok"] is False
+        assert "summary" in payload["detail"]
+        assert payload["roles"]["main"]["ok"] is True
+        assert payload["roles"]["summary"]["ok"] is False
+
+
+def test_test_endpoint_uses_stored_key_when_submitted_empty(tmp_path: Path) -> None:
+    default_llm = _default_llm()
+    store = _make_store()
+    used = []
+
+    def builder(provider):
+        used.append(provider.api_key)
+        return FakeClient(provider.base_url, provider.api_key, provider.model)
+
+    resolver, repo = _resolver(store, default_llm, builder=builder)
+    app = create_app(
+        _config(tmp_path, default_llm=default_llm),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=FakeAgent(),
+    )
+    with TestClient(app, headers={"X-Workspace-ID": "ws-stored"}) as client:
+        client.put("/api/user/config", json=_client_config())
+        response = client.post(
+            "/api/user/config/test",
+            json={
+                "main": {"base_url": "", "api_key": "", "model": ""},
+                "summary": {"base_url": "", "api_key": "", "model": ""},
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        # The stored (encrypted) key was decrypted and used for the probe.
+        assert "sk-user-secret-12345" in used
+
+
+def test_encryption_error_returns_clear_500_without_leak(tmp_path: Path) -> None:
+    import asyncio
+
+    from cryptography.fernet import Fernet
+
+    from server.storage.encryption import FernetCipher, KeyManager
+    from server.storage.user_configs import UserConfigRepository
+
+    db_path = tmp_path / "rotated.db"
+    store = _make_store(db_path)
+    cipher_a = FernetCipher(KeyManager(Fernet.generate_key().decode()))
+    repo_a = UserConfigRepository(store, cipher_a)
+
+    async def seed():
+        await store.initialize()
+        await repo_a.upsert(
+            "ws-enc-fail",
+            main={"base_url": "https://a.example.com", "api_key": "sk-user-secret-12345", "model": "m"},
+            summary={"base_url": "", "api_key": "", "model": ""},
+        )
+        await store.close()
+
+    asyncio.run(seed())
+
+    # The server is (re)started with a DIFFERENT AGENT_SECRET_KEY.
+    cipher_b = FernetCipher(KeyManager(Fernet.generate_key().decode()))
+    repo_b = UserConfigRepository(store, cipher_b)
+    resolver_b, _ = _resolver(store, LLMSettings())
+    app = create_app(
+        _config(tmp_path),
+        store=store, client_resolver=resolver_b, user_config_repo=repo_b, agent=FakeAgent(),
+    )
+    with TestClient(app, headers={"X-Workspace-ID": "ws-enc-fail"}, raise_server_exceptions=False) as client:
+        get_response = client.get("/api/user/config")
+        assert get_response.status_code == 500
+        assert "AGENT_SECRET_KEY" in get_response.json()["detail"]
+        assert "sk-user-secret" not in get_response.text
+        assert "Traceback" not in get_response.text
+
+        test_response = client.post("/api/user/config/test", json=_client_config())
+        assert test_response.status_code == 500
+        assert "AGENT_SECRET_KEY" in test_response.json()["detail"]
+        assert "sk-user-secret" not in test_response.text
+
+        session = client.post("/api/sessions", json={}).json()
+        chat_response = client.post(
+            "/api/chat", json={"session_id": session["id"], "message": "hi"}
+        )
+        assert chat_response.status_code == 500
+        assert "AGENT_SECRET_KEY" in chat_response.json()["detail"]
+        assert "sk-user-secret" not in chat_response.text
+
+
+def test_no_plaintext_at_rest_or_in_logs(tmp_path: Path, caplog) -> None:
+    db_path = tmp_path / "leak.db"
+    store = _make_store(db_path)
+    resolver, repo = _resolver(store, _default_llm())
+    app = create_app(
+        _config(tmp_path, default_llm=_default_llm()),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=FakeAgent(),
+    )
+    plaintext = "sk-user-secret-12345"
+    with TestClient(app, headers={"X-Workspace-ID": "ws-leak"}) as client:
+        client.put("/api/user/config", json=_client_config())
+        client.get("/api/user/config")
+        client.post("/api/user/config/test", json=_client_config())
+
+    # Raw database files (and any WAL/SHM leftovers) must not contain the key.
+    files = [path for path in tmp_path.iterdir() if path.is_file()]
+    assert any(path.name == "leak.db" for path in files)
+    for path in files:
+        data = path.read_bytes()
+        assert plaintext.encode() not in data, f"plaintext key found in {path.name}"
+    # Logs emitted during the flows must not contain the key either.
+    assert plaintext not in caplog.text

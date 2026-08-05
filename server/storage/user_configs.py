@@ -85,15 +85,24 @@ class UserConfigRepository:
                 summary_model=summary_default.model,
             )
 
+        main_api_key = self._cipher.decrypt(row["main_api_key_encrypted"]) or main_default.api_key
+        # Per-field fallback order for each role: user field -> user main ->
+        # default summary -> default main. An unconfigured summary role thus
+        # reuses the user's main provider (Settings UI: 留空则复用主模型).
         return UserLLMConfig(
             main_base_url=pick(row["main_base_url"], main_default.base_url),
-            main_api_key=self._cipher.decrypt(row["main_api_key_encrypted"])
-            or main_default.api_key,
+            main_api_key=main_api_key,
             main_model=pick(row["main_model"], main_default.model),
-            summary_base_url=pick(row["summary_base_url"], summary_default.base_url),
+            summary_base_url=pick(
+                row["summary_base_url"],
+                pick(row["main_base_url"], summary_default.base_url),
+            ),
             summary_api_key=self._cipher.decrypt(row["summary_api_key_encrypted"])
-            or summary_default.api_key,
-            summary_model=pick(row["summary_model"], summary_default.model),
+            or main_api_key,
+            summary_model=pick(
+                row["summary_model"],
+                pick(row["main_model"], summary_default.model),
+            ),
         )
 
     async def get_masked(self, workspace_id: str) -> dict[str, Any]:
