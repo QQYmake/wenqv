@@ -107,3 +107,43 @@ def test_new_visitor_can_load_index_html_without_cookie(tmp_path: Path) -> None:
 
         # Private API still requires identity even when static is mounted.
         assert client.get("/api/sessions").status_code == 401
+
+
+def test_cors_preflight_on_private_api_path_needs_no_identity() -> None:
+    """CORS answers preflights before the Auth guard runs.
+
+    A preflight targets the private ``/api/sessions`` path and carries no
+    workspace identity; it must still be answered by the outermost CORS
+    middleware with the full preflight contract, not a 401.
+    """
+    app = create_app(_config(cors=("https://app.example.com",)))
+    with TestClient(app) as client:
+        preflight = client.options(
+            "/api/sessions",
+            headers={
+                "Origin": "https://app.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "https://app.example.com"
+    assert preflight.headers["access-control-allow-credentials"] == "true"
+    assert "GET" in preflight.headers["access-control-allow-methods"]
+
+
+def test_cors_headers_are_added_to_auth_rejection() -> None:
+    """Auth-rejected responses stay browser-readable because CORS is outermost.
+
+    If CORS were inside the Auth guard, a 401 raised before it would reach the
+    browser without ``access-control-allow-origin``, and the SPA could not
+    distinguish an identity error from a network failure.
+    """
+    app = create_app(_config(cors=("https://app.example.com",)))
+    with TestClient(app) as client:
+        denied = client.get(
+            "/api/sessions", headers={"Origin": "https://app.example.com"}
+        )
+    assert denied.status_code == 401
+    assert denied.headers["access-control-allow-origin"] == "https://app.example.com"
+    assert denied.headers["access-control-allow-credentials"] == "true"
+    assert denied.json()["detail"] == "Missing workspace identity"

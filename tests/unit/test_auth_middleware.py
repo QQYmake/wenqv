@@ -93,3 +93,21 @@ def test_auth_middleware_rejects_invalid_workspace_id_shape() -> None:
         for bad in ("", " ", "1 Leading-digits-ok-but-!bad", "x" * 200):
             response = client.get("/api/sessions", headers={"X-Workspace-ID": bad})
             assert response.status_code == 401, bad
+
+
+def test_auth_middleware_whitelists_head_on_public_api_like_get() -> None:
+    """HEAD probes are whitelisted on public GET endpoints, still gated on private ones.
+
+    ``HEAD`` is the body-less twin of ``GET`` (RFC 9110): uptime monitors and
+    load balancers probe health endpoints with it. The whitelist must treat it
+    like GET so the routing layer decides whether HEAD is supported (405 in
+    the current FastAPI stack), instead of the middleware answering a false
+    ``401 Missing workspace identity``. Private API paths probed with HEAD must
+    still demand identity.
+    """
+    app = _build_app()
+    with TestClient(app) as client:
+        public = client.head("/api/health")
+        private = client.head("/api/sessions")
+    assert public.status_code != 401
+    assert private.status_code == 401
