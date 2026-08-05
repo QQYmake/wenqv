@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from .dependencies import get_services, get_workspace_id
+from .middleware import WORKSPACE_COOKIE_NAME
 from .services import APIServices
 
 
@@ -36,8 +38,12 @@ async def public_config(services: APIServices = Depends(get_services)) -> dict:
     return services.config.public_dict()
 
 
+_WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
 @router.get("/bootstrap")
 async def bootstrap(
+    request: Request,
     services: APIServices = Depends(get_services),
 ) -> dict[str, str]:
     """Issue a per-visitor workspace identity cookie.
@@ -46,12 +52,23 @@ async def bootstrap(
     and SameSite=Lax. The frontend keeps a non-sensitive localStorage mirror so
     the UI can show the active workspace; the cookie is the source of truth
     for requests. Clearing browser data loses the identity.
+
+    The cookie is stable across refreshes: a request that already carries a
+    valid workspace_id cookie reuses it instead of rotating the identity,
+    so a page reload keeps the same sessions and files. Only a missing or
+    malformed cookie gets a fresh identity.
     """
-    workspace_id = str(uuid.uuid4())
+    existing = request.cookies.get(WORKSPACE_COOKIE_NAME)
+    if existing and _WORKSPACE_ID.fullmatch(existing):
+        workspace_id = existing
+    else:
+        workspace_id = str(uuid.uuid4())
+    # Idempotent: registers the reused id (e.g. from a preseeded cookie) and
+    # keeps the workspaces table consistent with the issued identity.
     await services.store.ensure_workspace(workspace_id)
     response = JSONResponse({"workspace_id": workspace_id})
     response.set_cookie(
-        key="workspace_id",
+        key=WORKSPACE_COOKIE_NAME,
         value=workspace_id,
         httponly=True,
         secure=services.config.server.cookie_secure,
