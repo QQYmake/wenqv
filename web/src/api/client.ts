@@ -16,6 +16,9 @@ class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    // The workspace identity is a cookie set by /api/bootstrap; every request
+    // must carry it, also when VITE_API_BASE_URL points at another origin.
+    credentials: "include",
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
@@ -93,6 +96,10 @@ export const api = {
     return request("/api/config");
   },
 
+  async bootstrap(): Promise<{ workspace_id: string }> {
+    return request("/api/bootstrap");
+  },
+
   abortChat(sessionId: string): Promise<void> {
     return request("/api/chat/abort", {
       method: "POST",
@@ -106,6 +113,9 @@ export const api = {
   ): AsyncGenerator<AgentEvent> {
     const response = await fetch(`${API_BASE}/api/chat`, {
       method: "POST",
+      // Same cookie-identity requirement as request(): the SSE chat stream is
+      // a private API path and needs the workspace cookie on every origin.
+      credentials: "include",
       headers: {
         Accept: "text/event-stream",
         "Content-Type": "application/json",

@@ -19,7 +19,12 @@ from server.api import APIServices, AgentAdapter, api_router
 from server.api.middleware import AuthMiddleware
 from server.api.services import SkillCatalogAdapter, UnavailableAgent
 from server.config import AppConfig, LLMProviderConfig, load_config
-from server.storage import AgentStoreAdapter, SQLiteStore, build_side_cache
+from server.storage import (
+    AgentStoreAdapter,
+    IsolatedWorkspaceResolver,
+    SQLiteStore,
+    build_side_cache,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -207,7 +212,9 @@ def _compose_agent(
                 "context_manager": context_manager,
                 "config": agent_config,
                 "workspace_root": config.workspace.root,
-                "workspace_resolver": lambda _workspace_id: config.workspace.root,
+                "workspace_resolver": IsolatedWorkspaceResolver(
+                    config.workspace.root
+                ),
             },
         )
         return core, skill_manager, context_manager
