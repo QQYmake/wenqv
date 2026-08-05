@@ -86,7 +86,12 @@ class ContextManager:
                 )
         return total
 
-    async def prepare(self, messages: Sequence[ChatMessage]) -> ContextPreparation:
+    async def prepare(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        workspace_id: str | None = None,
+    ) -> ContextPreparation:
         original = tuple(messages)
         before = self.count_messages(original)
         trigger = int(self.config.token_budget * self.config.summary_trigger_ratio)
@@ -107,7 +112,9 @@ class ContextManager:
         summary_message: ChatMessage | None = None
         if summarizable_groups:
             try:
-                summary_message = await self._summarize(_flatten(summarizable_groups))
+                summary_message = await self._summarize(
+                    _flatten(summarizable_groups), workspace_id=workspace_id
+                )
                 summarized = True
             except Exception:
                 # Context compression is explicitly best-effort; main chat must
@@ -135,7 +142,9 @@ class ContextManager:
             dropped_messages=dropped,
         )
 
-    async def _summarize(self, messages: Sequence[ChatMessage]) -> ChatMessage:
+    async def _summarize(
+        self, messages: Sequence[ChatMessage], *, workspace_id: str | None = None
+    ) -> ChatMessage:
         transcript = _transcript(messages)
         prompt = ChatMessage(
             role="user",
@@ -147,7 +156,9 @@ class ContextManager:
             ),
             metadata={"kind": "summary_request"},
         )
-        response = await self.clients.get_client("summary").complete(
+        response = await self.clients.get_client(
+            "summary", workspace_id
+        ).complete(
             [prompt], tools=None, max_tokens=self.config.summary_max_tokens
         )
         content = response.content.strip()
@@ -206,7 +217,11 @@ class ContextManager:
         return fitted, dropped
 
     async def generate_title(
-        self, messages: Sequence[ChatMessage], *, max_chars: int = 48
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        max_chars: int = 48,
+        workspace_id: str | None = None,
     ) -> str:
         fallback = _fallback_title(messages, max_chars=max_chars)
         transcript = _transcript(
@@ -228,7 +243,9 @@ class ContextManager:
             metadata={"kind": "title_request"},
         )
         try:
-            response = await self.clients.get_client("summary").complete(
+            response = await self.clients.get_client(
+                "summary", workspace_id
+            ).complete(
                 [prompt], tools=None, max_tokens=self.config.title_max_tokens
             )
             title = _clean_title(response.content, max_chars=max_chars)

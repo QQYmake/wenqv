@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from server.storage import (
     SQLiteStore,
     build_side_cache,
 )
+from server.storage.encryption import EncryptionError
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,9 @@ def create_app(
     agent: Any | None = None,
     skill_manager: Any | None = None,
     title_generator: Any | None = None,
+    client_resolver: Any | None = None,
+    user_config_repo: Any | None = None,
+    cipher: Any | None = None,
 ) -> FastAPI:
     """Create an app with injectable adapters for integration tests."""
 
@@ -60,9 +64,19 @@ def create_app(
         store = SQLiteStore(config.storage.sqlite_path, cache=cache)
     agent_store = AgentStoreAdapter(store)
 
+    # Per-user LLM configuration: Fernet cipher for the api_key, a repository
+    # for encrypted read/write, and a ClientResolver adapter that merges user
+    # config with the default llm.* and pools clients. Tests inject fakes.
+    if cipher is None:
+        cipher = _build_cipher(config)
+    if user_config_repo is None:
+        user_config_repo = _build_user_config_repo(store, cipher)
+    if client_resolver is None:
+        client_resolver = _build_client_resolver(user_config_repo, config.llm)
+
     if agent is None:
         agent, default_skills, default_title_generator = _compose_agent(
-            config, agent_store
+            config, agent_store, store, client_resolver
         )
         skill_manager = skill_manager or default_skills
         title_generator = title_generator or default_title_generator
@@ -74,6 +88,8 @@ def create_app(
         skill_catalog=SkillCatalogAdapter(skill_manager),
         agent_store=agent_store,
         title_generator=title_generator,
+        client_resolver=client_resolver,
+        user_config_repo=user_config_repo,
     )
 
     @asynccontextmanager
@@ -106,6 +122,21 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @app.exception_handler(EncryptionError)
+    async def _encryption_error_handler(request: Request, exc: EncryptionError) -> JSONResponse:
+        """A wrong/missing AGENT_SECRET_KEY must fail with a clear, key-free error.
+
+        The stored ciphertext is unreadable (e.g. the key changed between
+        restarts). We never echo the exception or any key material to the client.
+        """
+
+        logger.warning("User config decryption failed; AGENT_SECRET_KEY may have changed")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "用户配置解密失败：请检查服务端 AGENT_SECRET_KEY"},
+        )
+
     app.state.services = services
     # Order matters: the last add_middleware call becomes the outermost layer.
     # CORS must run first so preflights are answered and credentials are
@@ -140,7 +171,10 @@ def create_app(
 
 
 def _compose_agent(
-    config: AppConfig, agent_store: AgentStoreAdapter
+    config: AppConfig,
+    agent_store: AgentStoreAdapter,
+    store: SQLiteStore,
+    client_resolver: Any,
 ) -> tuple[Any, Any | None, Any | None]:
     """Lazily compose the framework-free core, keeping imports at the edge."""
 
@@ -149,7 +183,6 @@ def _compose_agent(
     try:
         from server.agent.context import ContextConfig, ContextManager
         from server.agent.core import AgentConfig, AgentCore
-        from server.agent.llm import LLMClientFactory
         from server.agent.registry import ToolRegistry
         from server.agent.skills import SkillManager
         from server.agent.tools import (
@@ -161,14 +194,10 @@ def _compose_agent(
 
         skills_dir = config.workspace.root / "skills"
         skill_manager = SkillManager(skills_dir)
-        clients = LLMClientFactory(
-            _llm_mapping(config.llm.main),
-            (
-                _llm_mapping(config.llm.summary)
-                if config.llm.summary is not None
-                else None
-            ),
-        )
+        # The ClientResolver port replaces the startup-time LLMClientFactory
+        # singleton. Per-workspace user configs are honoured via the resolver;
+        # when no user config exists it falls back to config.llm.* defaults.
+        clients = client_resolver
         context_manager = ContextManager(
             clients,
             ContextConfig(
@@ -238,6 +267,44 @@ def _construct_supported(factory: Any, candidates: dict[str, Any]) -> Any:
 
 def _llm_mapping(provider: LLMProviderConfig) -> dict[str, Any]:
     return asdict(provider)
+
+
+def _build_cipher(config: AppConfig) -> Any:
+    """Build the Fernet cipher from AGENT_SECRET_KEY.
+
+    Change 2 uses an ephemeral dev key when the env var is absent so importing
+    server.main and running existing tests never fails. Change 3 tightens this
+    to fail-fast when ``llm.require_user_config`` is true.
+    """
+
+    from server.storage.encryption import FernetCipher, KeyManager
+
+    key_manager = KeyManager()
+    if not key_manager.configured:
+        # Dev/test fallback: an in-memory key. Rotates per process, so encrypted
+        # user keys are unreadable after restart — production must set the env.
+        try:
+            from cryptography.fernet import Fernet
+        except ImportError as exc:  # pragma: no cover - dependency guard
+            raise RuntimeError("cryptography is required for user API key storage") from exc
+        key_manager = KeyManager(Fernet.generate_key())
+        logger.warning(
+            "AGENT_SECRET_KEY is not set; using an ephemeral key. "
+            "User API keys will not survive a restart. Set AGENT_SECRET_KEY in production."
+        )
+    return FernetCipher(key_manager)
+
+
+def _build_user_config_repo(store: SQLiteStore, cipher: Any) -> Any:
+    from server.storage.user_configs import UserConfigRepository
+
+    return UserConfigRepository(store, cipher)
+
+
+def _build_client_resolver(user_config_repo: Any, default_llm: Any) -> Any:
+    from server.llm_resolver import LLMResolverAdapter
+
+    return LLMResolverAdapter(user_config_repo, default_llm)
 
 
 app = create_app()

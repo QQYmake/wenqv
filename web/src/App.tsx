@@ -4,6 +4,7 @@ import { Composer } from "./components/Composer";
 import { Icon } from "./components/Icon";
 import { MessageList } from "./components/MessageList";
 import { Sidebar } from "./components/Sidebar";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { Welcome } from "./components/Welcome";
 import type { AgentEvent, ChatMessage, PublicConfig, Session, Skill, Theme, ToolTrace } from "./types";
 
@@ -154,6 +155,8 @@ export function App({ client = api, renderWater = true }: AppProps) {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [appError, setAppError] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [apiConfigured, setApiConfigured] = useState(true);
   const abortControllerRef = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
   const skipSessionLoadRef = useRef<string | null>(null);
@@ -193,11 +196,15 @@ export function App({ client = api, renderWater = true }: AppProps) {
         }
       }
 
-      const [sessionResult, skillResult, configResult] = await Promise.allSettled([
-        client.listSessions(),
-        client.listSkills(),
-        client.getConfig(),
-      ]);
+      const [sessionResult, skillResult, configResult, userConfigResult] =
+        await Promise.allSettled([
+          client.listSessions(),
+          client.listSkills(),
+          client.getConfig(),
+          typeof client.getUserConfig === "function"
+            ? client.getUserConfig()
+            : Promise.reject(new Error("no user config endpoint")),
+        ]);
       if (!alive) return;
 
       if (sessionResult.status === "fulfilled") {
@@ -213,8 +220,18 @@ export function App({ client = api, renderWater = true }: AppProps) {
       }
       if (skillResult.status === "fulfilled") setSkills(skillResult.value);
       if (configResult.status === "fulfilled") setConfig(configResult.value);
+      if (userConfigResult.status === "fulfilled") {
+        const hasUserConfig = Boolean(userConfigResult.value.has_config);
+        const hasDefault =
+          configResult.status === "fulfilled" && Boolean(configResult.value.model_id);
+        setApiConfigured(hasUserConfig || hasDefault);
+      } else if (configResult.status === "fulfilled") {
+        // No user-config endpoint (e.g. mocked clients): fall back to whether a
+        // default model id is published by the server.
+        setApiConfigured(Boolean(configResult.value.model_id));
+      }
 
-      const failure = [sessionResult, skillResult, configResult].find(
+      const failure = [sessionResult, skillResult, configResult, userConfigResult].find(
         (result): result is PromiseRejectedResult => result.status === "rejected",
       );
       if (failure) setAppError(failure.reason instanceof Error ? failure.reason.message : "部分数据暂时无法读取");
@@ -515,12 +532,14 @@ export function App({ client = api, renderWater = true }: AppProps) {
         expanded={sidebarExpanded}
         loading={loadingSessions}
         theme={theme}
+        apiConfigured={apiConfigured}
         onExpand={() => setSidebarExpanded(true)}
         onNew={beginNewConversation}
         onSelect={selectSession}
         onRename={renameSession}
         onDelete={deleteSession}
         onThemeChange={setTheme}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       {sidebarExpanded && (
@@ -564,9 +583,11 @@ export function App({ client = api, renderWater = true }: AppProps) {
               selectedSkills={selectedSkills}
               streaming={streaming}
               abortEnabled={config.features?.abort !== false}
+              apiConfigured={apiConfigured}
               onChange={setDraft}
               onSubmit={(value) => void sendMessage(value)}
               onAbort={stopCurrentStream}
+              onOpenSettings={() => setSettingsOpen(true)}
               onToggleSkill={(name, selected) =>
                 setSelectedSkills((current) => {
                   const next = new Set(current);
@@ -585,6 +606,10 @@ export function App({ client = api, renderWater = true }: AppProps) {
           <span>{appError}</span>
           <button onClick={() => setAppError(null)} aria-label="关闭提示"><Icon name="close" /></button>
         </div>
+      )}
+
+      {settingsOpen && (
+        <SettingsPanel client={client} onClose={() => setSettingsOpen(false)} />
       )}
     </div>
   );

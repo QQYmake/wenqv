@@ -39,6 +39,22 @@ async def chat(
     session = await services.store.get_session(body.session_id, workspace_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    if services.client_resolver is not None:
+        # Warm the per-workspace config cache (async DB read) and reject with a
+        # structured 4xx when neither a user config nor a default fallback is
+        # available, so the frontend can guide the user to Settings.
+        resolver = services.client_resolver
+        warm = getattr(resolver, "warm", None)
+        if callable(warm):
+            await warm(workspace_id)
+        has_config_async = getattr(resolver, "has_config_async", None)
+        configured = (
+            await has_config_async(workspace_id)
+            if callable(has_config_async)
+            else bool(resolver.has_config(workspace_id))
+        )
+        if not configured:
+            raise HTTPException(status_code=412, detail="API 未配置")
     run = await services.runs.start(workspace_id, body.session_id, body.request_id)
     if run is None:
         raise HTTPException(status_code=409, detail="A chat run is already active")
@@ -128,7 +144,7 @@ async def _chat_stream(
         # remains best-effort and tightly bounded so a slow summary provider
         # cannot hold the stream open for its full model timeout.
         await _generate_initial_title(
-            services, initial_session, body.session_id, body.message
+            services, initial_session, body.session_id, body.message, workspace_id
         )
     except asyncio.CancelledError:
         run.abort_event.set()
@@ -167,6 +183,7 @@ async def _generate_initial_title(
     initial_session: Mapping[str, Any],
     session_id: str,
     first_message: str,
+    workspace_id: str,
 ) -> None:
     if int(initial_session.get("message_count", 0)) > 0:
         return
@@ -184,7 +201,7 @@ async def _generate_initial_title(
             method = getattr(
                 services.title_generator, "generate_title", services.title_generator
             )
-            result = method(messages)
+            result = method(messages, workspace_id=workspace_id)
             if hasattr(result, "__await__"):
                 result = await asyncio.wait_for(result, timeout=2.0)
             if hasattr(result, "content"):

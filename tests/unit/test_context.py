@@ -28,7 +28,7 @@ class Provider:
         self.main = main
         self.summary = summary or main
 
-    def get_client(self, role):
+    def get_client(self, role, workspace_id=None):
         return self.main if role == "main" else self.summary
 
 

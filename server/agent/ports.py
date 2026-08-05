@@ -37,6 +37,22 @@ class LLMClientProvider(Protocol):
 
 
 @runtime_checkable
+class ClientResolver(Protocol):
+    """Resolves an LLM client per request, per workspace.
+
+    The agent application service depends on this port instead of a startup-time
+    singleton so each user's API configuration can be honoured without touching
+    the framework-free core. ``has_config`` lets the HTTP layer reject chat
+    requests with a structured 4xx before attempting a model call when neither
+    a user configuration nor a default fallback is available.
+    """
+
+    def get_client(self, role: str, workspace_id: str | None = None) -> LLMClient: ...
+
+    def has_config(self, workspace_id: str | None = None) -> bool: ...
+
+
+@runtime_checkable
 class ConversationStore(Protocol):
     """Persistence contract required by the agent core.
 

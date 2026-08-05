@@ -224,6 +224,8 @@ class APIServices:
     agent_store: AgentStoreAdapter
     title_generator: Any | None = None
     runs: RunCoordinator = field(default_factory=RunCoordinator)
+    client_resolver: Any | None = None
+    user_config_repo: Any | None = None
 
 
 __all__ = [
