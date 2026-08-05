@@ -541,7 +541,20 @@ def test_test_endpoint_uses_stored_key_when_submitted_empty(tmp_path: Path) -> N
         assert "sk-user-secret-12345" in used
 
 
-def test_encryption_error_returns_clear_500_without_leak(tmp_path: Path) -> None:
+def test_rotated_secret_degrades_gracefully_without_leak(tmp_path: Path) -> None:
+    """A rotated AGENT_SECRET_KEY must never 500 or leak; stale rows read as empty.
+
+    Contract reconciliation between the change-2 and change-3-5-6 forks:
+    change-2 originally failed loud (clear 500 with an AGENT_SECRET_KEY hint);
+    change-3-5-6 deliberately replaced that with per-row graceful degradation
+    (``_decrypt_or_empty``) plus startup fail-fast for a malformed key (covered
+    in test_config_guards.py). The merged contract is the graceful one: a
+    restart with a different key keeps the app usable, shows the stored key as
+    unset in Settings, and guides the user to re-enter it — while operator key
+    misconfiguration is still caught at boot. The anti-leak guarantees of the
+    original test (no plaintext key, no traceback) are preserved below.
+    """
+
     import asyncio
 
     from cryptography.fernet import Fernet
@@ -574,24 +587,28 @@ def test_encryption_error_returns_clear_500_without_leak(tmp_path: Path) -> None
         store=store, client_resolver=resolver_b, user_config_repo=repo_b, agent=FakeAgent(),
     )
     with TestClient(app, headers={"X-Workspace-ID": "ws-enc-fail"}, raise_server_exceptions=False) as client:
+        # The masked view degrades gracefully: 200, key read as unset, chat locked.
         get_response = client.get("/api/user/config")
-        assert get_response.status_code == 500
-        assert "AGENT_SECRET_KEY" in get_response.json()["detail"]
+        assert get_response.status_code == 200
+        payload = get_response.json()
+        assert payload["has_config"] is False
+        assert payload["main"]["api_key"] == ""
         assert "sk-user-secret" not in get_response.text
         assert "Traceback" not in get_response.text
 
+        # The connection-test endpoint probes the submitted body, never 500s.
         test_response = client.post("/api/user/config/test", json=_client_config())
-        assert test_response.status_code == 500
-        assert "AGENT_SECRET_KEY" in test_response.json()["detail"]
+        assert test_response.status_code == 200
         assert "sk-user-secret" not in test_response.text
 
+        # Chat stays usable (no stored key -> 412 "API 未配置", not a 500).
         session = client.post("/api/sessions", json={}).json()
         chat_response = client.post(
             "/api/chat", json={"session_id": session["id"], "message": "hi"}
         )
-        assert chat_response.status_code == 500
-        assert "AGENT_SECRET_KEY" in chat_response.json()["detail"]
+        assert chat_response.status_code == 412
         assert "sk-user-secret" not in chat_response.text
+        assert "Traceback" not in chat_response.text
 
 
 def test_no_plaintext_at_rest_or_in_logs(tmp_path: Path, caplog) -> None:
