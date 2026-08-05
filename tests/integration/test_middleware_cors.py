@@ -147,3 +147,23 @@ def test_cors_headers_are_added_to_auth_rejection() -> None:
     assert denied.headers["access-control-allow-origin"] == "https://app.example.com"
     assert denied.headers["access-control-allow-credentials"] == "true"
     assert denied.json()["detail"] == "Missing workspace identity"
+
+
+def test_unknown_api_path_returns_json_404_not_spa_html(tmp_path: Path) -> None:
+    static = tmp_path / "dist"
+    static.mkdir()
+    (static / "index.html").write_text("<!doctype html><title>SPA</title>", encoding="utf-8")
+
+    app = create_app(_config(cors=("http://localhost:5173",), static_dir=static))
+    with TestClient(app, headers={"X-Workspace-ID": "visitor"}) as client:
+        # A missing API route must surface as a JSON 404 — never as the SPA
+        # shell, which the frontend would fail to parse as JSON.
+        missing = client.get("/api/does/not/exist")
+        assert missing.status_code == 404
+        assert missing.headers["content-type"].startswith("application/json")
+        assert "SPA" not in missing.text
+
+        # Client-side (non-API) routes still fall back to the SPA shell.
+        deep = client.get("/some/workspace/route")
+        assert deep.status_code == 200
+        assert "SPA" in deep.text

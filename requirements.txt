@@ -6,3 +6,4 @@ pydantic>=2.9,<3.0
 PyYAML>=6.0,<7.0
 aiosqlite>=0.20,<1.0
 redis>=5.1,<7.0
+cryptography>=42,<46

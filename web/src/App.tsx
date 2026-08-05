@@ -168,6 +168,21 @@ export function App({ client = api, renderWater = true }: AppProps) {
 
   useEffect(() => () => abortControllerRef.current?.abort(), []);
 
+  const refreshConfiguredState = useCallback(async () => {
+    // Re-read the server's view of the config so the composer unlocks right
+    // after a config is saved in Settings (the initial load may have run
+    // before anything was configured).
+    const configResult = await client.getConfig().catch(() => null);
+    const userConfigResult =
+      typeof client.getUserConfig === "function"
+        ? await client.getUserConfig().catch(() => null)
+        : null;
+    if (configResult) setConfig(configResult);
+    const hasUserConfig = Boolean(userConfigResult?.has_config);
+    const hasDefault = Boolean(configResult?.model_id);
+    setApiConfigured(hasUserConfig || hasDefault);
+  }, [client]);
+
   const refreshSessions = useCallback(async () => {
     const next = await client.listSessions();
     setSessions(next);
@@ -609,7 +624,11 @@ export function App({ client = api, renderWater = true }: AppProps) {
       )}
 
       {settingsOpen && (
-        <SettingsPanel client={client} onClose={() => setSettingsOpen(false)} />
+        <SettingsPanel
+          client={client}
+          onClose={() => setSettingsOpen(false)}
+          onConfigSaved={() => void refreshConfiguredState()}
+        />
       )}
     </div>
   );

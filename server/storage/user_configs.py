@@ -85,7 +85,10 @@ class UserConfigRepository:
                 summary_model=summary_default.model,
             )
 
-        main_api_key = self._cipher.decrypt(row["main_api_key_encrypted"]) or main_default.api_key
+        main_api_key = (
+            _decrypt_or_empty(self._cipher, row["main_api_key_encrypted"])
+            or main_default.api_key
+        )
         # Per-field fallback order for each role: user field -> user main ->
         # default summary -> default main. An unconfigured summary role thus
         # reuses the user's main provider (Settings UI: 留空则复用主模型).
@@ -97,8 +100,10 @@ class UserConfigRepository:
                 row["summary_base_url"],
                 pick(row["main_base_url"], summary_default.base_url),
             ),
-            summary_api_key=self._cipher.decrypt(row["summary_api_key_encrypted"])
-            or main_api_key,
+            summary_api_key=(
+                _decrypt_or_empty(self._cipher, row["summary_api_key_encrypted"])
+                or main_api_key
+            ),
             summary_model=pick(
                 row["summary_model"],
                 pick(row["main_model"], summary_default.model),
@@ -106,7 +111,11 @@ class UserConfigRepository:
         )
 
     async def get_masked(self, workspace_id: str) -> dict[str, Any]:
-        """Return the browser-safe view: masked keys, never plaintext."""
+        """Return the browser-safe view: masked keys, never plaintext.
+
+        ``has_config`` means the main model is ready for chat (a row that only
+        carries a summary config does not unlock the conversation).
+        """
 
         row = await self._store.get_user_config(workspace_id)
         if row is None:
@@ -115,18 +124,21 @@ class UserConfigRepository:
                 "summary": {"base_url": "", "api_key": "", "model": ""},
                 "has_config": False,
             }
+        main_api_key = _decrypt_or_empty(self._cipher, row["main_api_key_encrypted"])
         return {
             "main": {
                 "base_url": row["main_base_url"],
-                "api_key": mask_api_key(self._cipher.decrypt(row["main_api_key_encrypted"])),
+                "api_key": mask_api_key(main_api_key),
                 "model": row["main_model"],
             },
             "summary": {
                 "base_url": row["summary_base_url"],
-                "api_key": mask_api_key(self._cipher.decrypt(row["summary_api_key_encrypted"])),
+                "api_key": mask_api_key(
+                    _decrypt_or_empty(self._cipher, row["summary_api_key_encrypted"])
+                ),
                 "model": row["summary_model"],
             },
-            "has_config": True,
+            "has_config": bool(row["main_base_url"] and row["main_model"] and main_api_key),
         }
 
     async def upsert(
@@ -182,6 +194,24 @@ def _persisted_key(
     if existing is None:
         return ""
     return existing.get(column, "")
+
+
+def _decrypt_or_empty(cipher: FernetCipher, token: str) -> str:
+    """Decrypt a stored key, treating an undecryptable token as empty.
+
+    A token becomes undecryptable when the server secret rotated (e.g. the
+    dev server previously ran with an ephemeral key). Failing loudly here
+    would turn a stale row into a 500 for every chat request; treating it as
+    "not configured" keeps the app usable and guides the user to re-enter the
+    key in Settings.
+    """
+
+    if not token:
+        return ""
+    try:
+        return cipher.decrypt(token)
+    except Exception:
+        return ""
 
 
 def _provider(default_llm: Any, role: str) -> LLMProviderConfig:

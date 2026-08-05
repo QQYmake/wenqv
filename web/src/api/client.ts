@@ -46,7 +46,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    // A 200 with a non-JSON body (e.g. the SPA shell served for a missing API
+    // route by an outdated backend) must surface as a readable error instead
+    // of a raw "Unexpected token '<', \"<!doctype ...\" SyntaxError.
+    throw new ApiError(
+      `服务器返回了非 JSON 响应（HTTP ${response.status}）——API 路由可能不存在，或后端版本过旧`,
+      response.status,
+    );
+  }
 }
 
 function asArray<T>(value: T[] | { [key: string]: T[] }, key: string): T[] {

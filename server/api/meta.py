@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from .dependencies import get_services, get_workspace_id
-from .middleware import WORKSPACE_COOKIE_NAME
+from .middleware.auth import WORKSPACE_COOKIE_NAME, _WORKSPACE_ID
 from .services import APIServices
 
 
@@ -38,15 +37,18 @@ async def public_config(services: APIServices = Depends(get_services)) -> dict:
     return services.config.public_dict()
 
 
-_WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-
-
 @router.get("/bootstrap")
 async def bootstrap(
     request: Request,
     services: APIServices = Depends(get_services),
 ) -> dict[str, str]:
-    """Issue a per-visitor workspace identity cookie.
+    """Issue (or refresh) a per-visitor workspace identity cookie.
+
+    The identity is stable across page reloads and tabs: when the request
+    already carries a valid ``workspace_id`` cookie (or an explicit
+    ``X-Workspace-ID`` header), the same id is returned instead of minting a
+    new one. Without reuse, every page load would create a fresh workspace and
+    a config saved moments earlier would no longer be visible to the chat flow.
 
     The cookie is HttpOnly (JS cannot read it), Secure (HTTPS only in prod),
     and SameSite=Lax. The frontend keeps a non-sensitive localStorage mirror so
@@ -59,12 +61,13 @@ async def bootstrap(
     malformed cookie gets a fresh identity.
     """
     existing = request.cookies.get(WORKSPACE_COOKIE_NAME)
-    if existing and _WORKSPACE_ID.fullmatch(existing):
-        workspace_id = existing
-    else:
-        workspace_id = str(uuid.uuid4())
-    # Idempotent: registers the reused id (e.g. from a preseeded cookie) and
-    # keeps the workspaces table consistent with the issued identity.
+    if not (existing and _WORKSPACE_ID.fullmatch(existing)):
+        header = request.headers.get("X-Workspace-ID")
+        existing = header if header and _WORKSPACE_ID.fullmatch(header) else None
+    workspace_id = existing or str(uuid.uuid4())
+    # Idempotent: registers the reused id (e.g. from a preseeded cookie or an
+    # explicit header) and keeps the workspaces table consistent with the
+    # issued identity.
     await services.store.ensure_workspace(workspace_id)
     response = JSONResponse({"workspace_id": workspace_id})
     response.set_cookie(

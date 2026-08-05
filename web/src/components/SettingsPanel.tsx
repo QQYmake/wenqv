@@ -6,6 +6,8 @@ import { Icon } from "./Icon";
 interface SettingsPanelProps {
   client: AgentApi;
   onClose: () => void;
+  /** Called after a successful save so the app can refresh its config state. */
+  onConfigSaved?: () => void;
 }
 
 const EMPTY: ProviderConfigView = { base_url: "", api_key: "", model: "" };
@@ -27,7 +29,7 @@ function makeEditableFields(initial?: UserLLMConfigInput | null): UserLLMConfigI
   };
 }
 
-export function SettingsPanel({ client, onClose }: SettingsPanelProps) {
+export function SettingsPanel({ client, onClose, onConfigSaved }: SettingsPanelProps) {
   const [fields, setFields] = useState<UserLLMConfigInput>(() => makeEditableFields(null));
   const [masked, setMasked] = useState<UserLLMConfigInput>(() => makeFields(null));
   const [hasConfig, setHasConfig] = useState(false);
@@ -81,6 +83,7 @@ export function SettingsPanel({ client, onClose }: SettingsPanelProps) {
         main: { ...current.main, api_key: "" },
         summary: { ...current.summary, api_key: "" },
       }));
+      onConfigSaved?.();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "保存失败");
     } finally {

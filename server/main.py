@@ -32,13 +32,25 @@ logger = logging.getLogger(__name__)
 
 
 class SPAStaticFiles(StaticFiles):
-    """Serve Vite assets and fall back to index.html for client routes."""
+    """Serve Vite assets and fall back to index.html for client routes.
+
+    API paths (``/api/*``) are excluded from the fallback: a missing API route
+    must surface as a JSON 404, never as the SPA shell (which the frontend then
+    fails to parse as JSON, e.g. "Unexpected token '<', \"<!doctype ...").
+    """
 
     async def get_response(self, path: str, scope: dict) -> Any:
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code == 404 and "." not in Path(path).name:
+            # StaticFiles normalizes paths with os.sep; on Windows that yields
+            # backslashes ("api\user\config"), so compare on a "/" view.
+            normalized = path.replace("\\", "/")
+            if (
+                exc.status_code == 404
+                and "." not in Path(normalized).name
+                and not normalized.startswith("api/")
+            ):
                 return await super().get_response("index.html", scope)
             raise
 
@@ -272,17 +284,21 @@ def _llm_mapping(provider: LLMProviderConfig) -> dict[str, Any]:
 def _build_cipher(config: AppConfig) -> Any:
     """Build the Fernet cipher from AGENT_SECRET_KEY.
 
-    Change 2 uses an ephemeral dev key when the env var is absent so importing
-    server.main and running existing tests never fails. Change 3 tightens this
-    to fail-fast when ``llm.require_user_config`` is true.
+    When ``llm.require_user_config`` is true the per-user config path is the
+    primary flow: a missing AGENT_SECRET_KEY fails fast at startup so encrypted
+    keys are never silently unreadable. When it is false (the legacy default
+    path), an ephemeral dev key is used and a warning is logged.
     """
 
-    from server.storage.encryption import FernetCipher, KeyManager
+    from server.storage.encryption import EncryptionError, FernetCipher, KeyManager
 
     key_manager = KeyManager()
     if not key_manager.configured:
-        # Dev/test fallback: an in-memory key. Rotates per process, so encrypted
-        # user keys are unreadable after restart — production must set the env.
+        if config.llm.require_user_config:
+            raise EncryptionError(
+                "AGENT_SECRET_KEY is not set but llm.require_user_config is true; "
+                "set AGENT_SECRET_KEY before starting the server."
+            )
         try:
             from cryptography.fernet import Fernet
         except ImportError as exc:  # pragma: no cover - dependency guard
@@ -292,6 +308,20 @@ def _build_cipher(config: AppConfig) -> Any:
             "AGENT_SECRET_KEY is not set; using an ephemeral key. "
             "User API keys will not survive a restart. Set AGENT_SECRET_KEY in production."
         )
+    else:
+        # Fail fast when the key is present but malformed: an invalid Fernet key
+        # would otherwise 500 on the first encrypt/decrypt (e.g. a manually set
+        # AGENT_SECRET_KEY that is not 32 urlsafe base64 bytes).
+        try:
+            from cryptography.fernet import Fernet
+
+            Fernet(key_manager.require())
+        except Exception as exc:  # pragma: no cover - environment misconfiguration
+            raise EncryptionError(
+                "AGENT_SECRET_KEY is not a valid Fernet key (must be 32 url-safe "
+                "base64 bytes). Delete .agent_secret_key (or set a fresh key) and "
+                "restart via start.bat to generate a valid one."
+            ) from exc
     return FernetCipher(key_manager)
 
 
@@ -307,13 +337,39 @@ def _build_client_resolver(user_config_repo: Any, default_llm: Any) -> Any:
     return LLMResolverAdapter(user_config_repo, default_llm)
 
 
-app = create_app()
+def get_app() -> FastAPI:
+    """Create the production app lazily.
+
+    ``app`` is exposed as a module-level attribute via ``__getattr__`` so that
+    simply importing server.main (e.g. in tests) does not eagerly build it —
+    important because the production config.yaml sets
+    ``llm.require_user_config=true``, which fails fast when AGENT_SECRET_KEY is
+    unset. Note there must be NO module-level ``app = None`` binding: it would
+    shadow ``__getattr__`` and make ``uvicorn server.main:app`` resolve to
+    ``None``, crashing every request with 500.
+    """
+
+    global app
+    existing = globals().get("app")
+    if existing is None:
+        app = create_app()
+    return app
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
-    uvicorn.run("server.main:app", host=app.state.services.config.server.host, port=app.state.services.config.server.port)
+    uvicorn.run(
+        "server.main:app",
+        host=get_app().state.services.config.server.host,
+        port=get_app().state.services.config.server.port,
+    )
 
 
-__all__ = ["app", "create_app"]
+__all__ = ["app", "create_app", "get_app"]

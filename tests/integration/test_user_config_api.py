@@ -242,6 +242,109 @@ def test_user_config_test_endpoint_succeeds_with_fake_client(tmp_path: Path) -> 
         assert response.json()["ok"] is True
 
 
+def test_saved_config_survives_bootstrap_reload(tmp_path: Path) -> None:
+    """Page reload (bootstrap again) must keep the same workspace identity.
+
+    This mirrors the reported failure: main config saved successfully, but the
+    chat flow afterwards saw "API 未配置" because every reload minted a brand
+    new workspace id and the saved row belonged to the previous one.
+    """
+    store = _make_store()
+    resolver, repo = _resolver(store, LLMSettings())
+    app = create_app(
+        _config(tmp_path),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=FakeAgent(),
+    )
+    with TestClient(app) as client:  # cookie jar shared across "reloads"
+        boot1 = client.get("/api/bootstrap").json()
+        put = client.put("/api/user/config", json=_client_config())
+        assert put.status_code == 200
+
+        # Simulate a reload: bootstrap runs again and must reuse the identity.
+        boot2 = client.get("/api/bootstrap").json()
+        assert boot2["workspace_id"] == boot1["workspace_id"]
+
+        # The saved config is visible and chat works (no explicit header).
+        assert client.get("/api/user/config").json()["has_config"] is True
+        session = client.post("/api/sessions", json={}).json()
+        with client.stream(
+            "POST", "/api/chat",
+            json={"session_id": session["id"], "message": "hi"},
+        ) as response:
+            assert response.status_code == 200
+
+
+def test_user_config_test_endpoint_probes_summary_without_main(tmp_path: Path) -> None:
+    """A summary-only config can be tested; the endpoint must not 422 on main."""
+    store = _make_store()
+    resolver, repo = _resolver(store, LLMSettings())
+    app = create_app(
+        _config(tmp_path),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=FakeAgent(),
+    )
+    with TestClient(app, headers={"X-Workspace-ID": "ws-sum"}) as client:
+        body = {
+            "main": {"base_url": "", "api_key": "", "model": ""},
+            "summary": {
+                "base_url": "https://summary.example.com/v1",
+                "api_key": "sk-summary-key-1",
+                "model": "summary-model",
+            },
+        }
+        response = client.post("/api/user/config/test", json=body)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["roles"]["summary"]["ok"] is True
+        assert "main" not in payload["roles"]
+        assert "主模型未配置" in payload["detail"]
+
+
+def test_user_config_test_endpoint_probes_both_roles(tmp_path: Path) -> None:
+    store = _make_store()
+    resolver, repo = _resolver(store, LLMSettings())
+    app = create_app(
+        _config(tmp_path),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=FakeAgent(),
+    )
+    with TestClient(app, headers={"X-Workspace-ID": "ws-both"}) as client:
+        body = {
+            "main": {
+                "base_url": "https://api.example.com/v1",
+                "api_key": "sk-user-secret-12345",
+                "model": "gpt-test",
+            },
+            "summary": {
+                "base_url": "https://summary.example.com/v1",
+                "api_key": "sk-summary-key-1",
+                "model": "summary-model",
+            },
+        }
+        response = client.post("/api/user/config/test", json=body)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert set(payload["roles"]) == {"main", "summary"}
+        assert all(probe["ok"] for probe in payload["roles"].values())
+
+
+def test_user_config_test_endpoint_422_when_no_complete_role(tmp_path: Path) -> None:
+    store = _make_store()
+    resolver, repo = _resolver(store, LLMSettings())
+    app = create_app(
+        _config(tmp_path),
+        store=store, client_resolver=resolver, user_config_repo=repo, agent=FakeAgent(),
+    )
+    with TestClient(app, headers={"X-Workspace-ID": "ws-none"}) as client:
+        body = {
+            "main": {"base_url": "", "api_key": "", "model": ""},
+            "summary": {"base_url": "", "api_key": "", "model": ""},
+        }
+        response = client.post("/api/user/config/test", json=body)
+        assert response.status_code == 422
+        assert "至少填写一个" in response.json()["detail"]
+
+
 def _make_store(path=None):
     from server.storage import SQLiteStore
     if path is None:
