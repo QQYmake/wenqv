@@ -1,17 +1,26 @@
+server:
+  host: 127.0.0.1
+  port: 8000
+  # secret_key is NOT stored here; it comes from the AGENT_SECRET_KEY env var.
+  # When llm.require_user_config is true, a missing AGENT_SECRET_KEY fails fast.
+  cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+
 llm:
+  # When true, each visitor must configure their own API key in Settings; the
+  # llm.main block below is only a fallback. A missing AGENT_SECRET_KEY then
+  # fails fast at startup.
+  require_user_config: true
   main:
-    base_url: https://api.openai.com/v1
+    base_url: ""
     api_key: ""
-    model: gpt-4.1-mini
-    max_tokens: 4096
-    temperature: 0.2
-    timeout_s: 120
+    model: ""
   # Optional. When omitted or incomplete, summary tasks reuse llm.main.
   # summary:
-  #   base_url: https://api.openai.com/v1
+  #   base_url: ""
   #   api_key: ""
-  #   model: gpt-4.1-nano
-  #   max_tokens: 1024
+  #   model: ""
 
 agent:
   max_turns: 20
@@ -32,11 +41,3 @@ storage:
 workspace:
   id: default
   root: .
-
-server:
-  host: 127.0.0.1
-  port: 8000
-  cors_origins:
-    - http://localhost:5173
-    - http://127.0.0.1:5173
-

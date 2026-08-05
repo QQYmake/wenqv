@@ -1,4 +1,12 @@
-import type { AgentEvent, ChatMessage, PublicConfig, Session, Skill } from "../types";
+import type {
+  AgentEvent,
+  ChatMessage,
+  PublicConfig,
+  Session,
+  Skill,
+  UserLLMConfig,
+  UserLLMConfigInput,
+} from "../types";
 import { parseSSEStream } from "./sse";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -16,6 +24,9 @@ class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    // The workspace identity is a cookie set by /api/bootstrap; every request
+    // must carry it, also when VITE_API_BASE_URL points at another origin.
+    credentials: "include",
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
@@ -35,7 +46,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    // A 200 with a non-JSON body (e.g. the SPA shell served for a missing API
+    // route by an outdated backend) must surface as a readable error instead
+    // of a raw "Unexpected token '<', \"<!doctype ...\" SyntaxError.
+    throw new ApiError(
+      `服务器返回了非 JSON 响应（HTTP ${response.status}）——API 路由可能不存在，或后端版本过旧`,
+      response.status,
+    );
+  }
 }
 
 function asArray<T>(value: T[] | { [key: string]: T[] }, key: string): T[] {
@@ -93,6 +114,28 @@ export const api = {
     return request("/api/config");
   },
 
+  async bootstrap(): Promise<{ workspace_id: string }> {
+    return request("/api/bootstrap");
+  },
+
+  getUserConfig(): Promise<UserLLMConfig> {
+    return request("/api/user/config");
+  },
+
+  putUserConfig(body: UserLLMConfigInput): Promise<UserLLMConfig> {
+    return request("/api/user/config", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  },
+
+  testUserConfig(body: UserLLMConfigInput): Promise<{ ok: boolean; detail: string }> {
+    return request("/api/user/config/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
   abortChat(sessionId: string): Promise<void> {
     return request("/api/chat/abort", {
       method: "POST",
@@ -106,6 +149,9 @@ export const api = {
   ): AsyncGenerator<AgentEvent> {
     const response = await fetch(`${API_BASE}/api/chat`, {
       method: "POST",
+      // Same cookie-identity requirement as request(): the SSE chat stream is
+      // a private API path and needs the workspace cookie on every origin.
+      credentials: "include",
       headers: {
         Accept: "text/event-stream",
         "Content-Type": "application/json",

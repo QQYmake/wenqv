@@ -117,7 +117,9 @@ class OpenAICompatClient:
                 from openai import AsyncOpenAI
             except ImportError as exc:  # pragma: no cover - integration guard
                 raise RuntimeError(
-                    "The 'openai' package is required for OpenAICompatClient"
+                    "The 'openai' package is required for OpenAICompatClient. "
+                    "Activate the project virtualenv (.venv) and run: "
+                    "python -m pip install -r requirements.txt, then restart the server."
                 ) from exc
             self._sdk_client = AsyncOpenAI(
                 base_url=self.config.base_url,
@@ -236,9 +238,11 @@ class LLMClientFactory:
         }
         self._clients: dict[int, LLMClient] = {}
 
-    def get_client(self, role: str) -> LLMClient:
+    def get_client(self, role: str, workspace_id: str | None = None) -> LLMClient:
         if role not in ("main", "summary"):
             raise ValueError("LLM role must be 'main' or 'summary'")
+        # The legacy factory is workspace-agnostic; it serves the global default
+        # config. Per-workspace selection is the resolver adapter's job.
         source = self._sources[cast(LLMRole, role)]
         cache_key = id(source)
         if cache_key not in self._clients:
@@ -249,6 +253,11 @@ class LLMClientFactory:
                 client = self._builder(config)
             self._clients[cache_key] = client
         return self._clients[cache_key]
+
+    def has_config(self, workspace_id: str | None = None) -> bool:
+        """The default factory always reports a configured client."""
+
+        return True
 
 
 _default_factory: LLMClientFactory | None = None
@@ -267,9 +276,9 @@ def configure_clients(
     return _default_factory
 
 
-def get_client(role: LLMRole) -> LLMClient:
+def get_client(role: LLMRole, workspace_id: str | None = None) -> LLMClient:
     """Return a configured role client, applying summary fallback internally."""
 
     if _default_factory is None:
         raise RuntimeError("LLM clients have not been configured")
-    return _default_factory.get_client(role)
+    return _default_factory.get_client(role, workspace_id)

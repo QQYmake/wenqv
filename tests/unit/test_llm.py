@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 
-from server.agent.llm import LLMClientFactory, LLMConfig
+from server.agent.llm import LLMClientFactory, LLMConfig, OpenAICompatClient
 from server.agent.models import ChatMessage, LLMResponse, LLMStreamChunk
 
 
@@ -81,3 +81,20 @@ def test_factory_accepts_an_application_config_object() -> None:
     factory.get_client("main")
     assert captured[0].timeout_s == 9
     assert captured[0].model == "model"
+
+
+async def test_openai_missing_raises_actionable_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = __import__
+
+    def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "openai":
+            raise ImportError("No module named 'openai'")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", blocked_import)
+
+    client = OpenAICompatClient(LLMConfig("https://example.test/v1", "key", "model"))
+    with pytest.raises(RuntimeError, match=r"pip install -r requirements\.txt"):
+        await client.complete([ChatMessage(role="user", content="hi")])

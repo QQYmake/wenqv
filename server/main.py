@@ -9,29 +9,48 @@ from pathlib import Path
 from typing import Any
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from server.api import APIServices, AgentAdapter, api_router
+from server.api.middleware import AuthMiddleware
 from server.api.services import SkillCatalogAdapter, UnavailableAgent
 from server.config import AppConfig, LLMProviderConfig, load_config
-from server.storage import AgentStoreAdapter, SQLiteStore, build_side_cache
+from server.storage import (
+    AgentStoreAdapter,
+    IsolatedWorkspaceResolver,
+    SQLiteStore,
+    build_side_cache,
+)
+from server.storage.encryption import EncryptionError
 
 
 logger = logging.getLogger(__name__)
 
 
 class SPAStaticFiles(StaticFiles):
-    """Serve Vite assets and fall back to index.html for client routes."""
+    """Serve Vite assets and fall back to index.html for client routes.
+
+    API paths (``/api/*``) are excluded from the fallback: a missing API route
+    must surface as a JSON 404, never as the SPA shell (which the frontend then
+    fails to parse as JSON, e.g. "Unexpected token '<', \"<!doctype ...").
+    """
 
     async def get_response(self, path: str, scope: dict) -> Any:
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code == 404 and "." not in Path(path).name:
+            # StaticFiles normalizes paths with os.sep; on Windows that yields
+            # backslashes ("api\user\config"), so compare on a "/" view.
+            normalized = path.replace("\\", "/")
+            if (
+                exc.status_code == 404
+                and "." not in Path(normalized).name
+                and not normalized.startswith("api/")
+            ):
                 return await super().get_response("index.html", scope)
             raise
 
@@ -43,6 +62,9 @@ def create_app(
     agent: Any | None = None,
     skill_manager: Any | None = None,
     title_generator: Any | None = None,
+    client_resolver: Any | None = None,
+    user_config_repo: Any | None = None,
+    cipher: Any | None = None,
 ) -> FastAPI:
     """Create an app with injectable adapters for integration tests."""
 
@@ -54,9 +76,19 @@ def create_app(
         store = SQLiteStore(config.storage.sqlite_path, cache=cache)
     agent_store = AgentStoreAdapter(store)
 
+    # Per-user LLM configuration: Fernet cipher for the api_key, a repository
+    # for encrypted read/write, and a ClientResolver adapter that merges user
+    # config with the default llm.* and pools clients. Tests inject fakes.
+    if cipher is None:
+        cipher = _build_cipher(config)
+    if user_config_repo is None:
+        user_config_repo = _build_user_config_repo(store, cipher)
+    if client_resolver is None:
+        client_resolver = _build_client_resolver(user_config_repo, config.llm)
+
     if agent is None:
         agent, default_skills, default_title_generator = _compose_agent(
-            config, agent_store
+            config, agent_store, store, client_resolver
         )
         skill_manager = skill_manager or default_skills
         title_generator = title_generator or default_title_generator
@@ -68,6 +100,8 @@ def create_app(
         skill_catalog=SkillCatalogAdapter(skill_manager),
         agent_store=agent_store,
         title_generator=title_generator,
+        client_resolver=client_resolver,
+        user_config_repo=user_config_repo,
     )
 
     @asynccontextmanager
@@ -88,16 +122,43 @@ def create_app(
                     await result
             await store.close()
 
+    origins = list(config.server.cors_origins)
+    if any(origin == "*" for origin in origins):
+        raise ValueError(
+            "CORS allow_credentials=True forbids the wildcard origin; "
+            "configure explicit origins in config.server.cors_origins."
+        )
+
     app = FastAPI(
         title="Agent Lake",
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @app.exception_handler(EncryptionError)
+    async def _encryption_error_handler(request: Request, exc: EncryptionError) -> JSONResponse:
+        """A wrong/missing AGENT_SECRET_KEY must fail with a clear, key-free error.
+
+        The stored ciphertext is unreadable (e.g. the key changed between
+        restarts). We never echo the exception or any key material to the client.
+        """
+
+        logger.warning("User config decryption failed; AGENT_SECRET_KEY may have changed")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "用户配置解密失败：请检查服务端 AGENT_SECRET_KEY"},
+        )
+
     app.state.services = services
+    # Order matters: the last add_middleware call becomes the outermost layer.
+    # CORS must run first so preflights are answered and credentials are
+    # exposed to listed origins before the Auth guard runs; Auth then injects
+    # the workspace header and guards private API paths.
+    app.add_middleware(AuthMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(config.server.cors_origins),
-        allow_credentials=False,
+        allow_origins=origins,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Accept", "X-Workspace-ID"],
         expose_headers=["X-Request-ID"],
@@ -122,7 +183,10 @@ def create_app(
 
 
 def _compose_agent(
-    config: AppConfig, agent_store: AgentStoreAdapter
+    config: AppConfig,
+    agent_store: AgentStoreAdapter,
+    store: SQLiteStore,
+    client_resolver: Any,
 ) -> tuple[Any, Any | None, Any | None]:
     """Lazily compose the framework-free core, keeping imports at the edge."""
 
@@ -131,7 +195,6 @@ def _compose_agent(
     try:
         from server.agent.context import ContextConfig, ContextManager
         from server.agent.core import AgentConfig, AgentCore
-        from server.agent.llm import LLMClientFactory
         from server.agent.registry import ToolRegistry
         from server.agent.skills import SkillManager
         from server.agent.tools import (
@@ -143,14 +206,10 @@ def _compose_agent(
 
         skills_dir = config.workspace.root / "skills"
         skill_manager = SkillManager(skills_dir)
-        clients = LLMClientFactory(
-            _llm_mapping(config.llm.main),
-            (
-                _llm_mapping(config.llm.summary)
-                if config.llm.summary is not None
-                else None
-            ),
-        )
+        # The ClientResolver port replaces the startup-time LLMClientFactory
+        # singleton. Per-workspace user configs are honoured via the resolver;
+        # when no user config exists it falls back to config.llm.* defaults.
+        clients = client_resolver
         context_manager = ContextManager(
             clients,
             ContextConfig(
@@ -194,7 +253,9 @@ def _compose_agent(
                 "context_manager": context_manager,
                 "config": agent_config,
                 "workspace_root": config.workspace.root,
-                "workspace_resolver": lambda _workspace_id: config.workspace.root,
+                "workspace_resolver": IsolatedWorkspaceResolver(
+                    config.workspace.root
+                ),
             },
         )
         return core, skill_manager, context_manager
@@ -220,13 +281,95 @@ def _llm_mapping(provider: LLMProviderConfig) -> dict[str, Any]:
     return asdict(provider)
 
 
-app = create_app()
+def _build_cipher(config: AppConfig) -> Any:
+    """Build the Fernet cipher from AGENT_SECRET_KEY.
+
+    When ``llm.require_user_config`` is true the per-user config path is the
+    primary flow: a missing AGENT_SECRET_KEY fails fast at startup so encrypted
+    keys are never silently unreadable. When it is false (the legacy default
+    path), an ephemeral dev key is used and a warning is logged.
+    """
+
+    from server.storage.encryption import EncryptionError, FernetCipher, KeyManager
+
+    key_manager = KeyManager()
+    if not key_manager.configured:
+        if config.llm.require_user_config:
+            raise EncryptionError(
+                "AGENT_SECRET_KEY is not set but llm.require_user_config is true; "
+                "set AGENT_SECRET_KEY before starting the server."
+            )
+        try:
+            from cryptography.fernet import Fernet
+        except ImportError as exc:  # pragma: no cover - dependency guard
+            raise RuntimeError("cryptography is required for user API key storage") from exc
+        key_manager = KeyManager(Fernet.generate_key())
+        logger.warning(
+            "AGENT_SECRET_KEY is not set; using an ephemeral key. "
+            "User API keys will not survive a restart. Set AGENT_SECRET_KEY in production."
+        )
+    else:
+        # Fail fast when the key is present but malformed: an invalid Fernet key
+        # would otherwise 500 on the first encrypt/decrypt (e.g. a manually set
+        # AGENT_SECRET_KEY that is not 32 urlsafe base64 bytes).
+        try:
+            from cryptography.fernet import Fernet
+
+            Fernet(key_manager.require())
+        except Exception as exc:  # pragma: no cover - environment misconfiguration
+            raise EncryptionError(
+                "AGENT_SECRET_KEY is not a valid Fernet key (must be 32 url-safe "
+                "base64 bytes). Delete .agent_secret_key (or set a fresh key) and "
+                "restart via start.bat to generate a valid one."
+            ) from exc
+    return FernetCipher(key_manager)
+
+
+def _build_user_config_repo(store: SQLiteStore, cipher: Any) -> Any:
+    from server.storage.user_configs import UserConfigRepository
+
+    return UserConfigRepository(store, cipher)
+
+
+def _build_client_resolver(user_config_repo: Any, default_llm: Any) -> Any:
+    from server.llm_resolver import LLMResolverAdapter
+
+    return LLMResolverAdapter(user_config_repo, default_llm)
+
+
+def get_app() -> FastAPI:
+    """Create the production app lazily.
+
+    ``app`` is exposed as a module-level attribute via ``__getattr__`` so that
+    simply importing server.main (e.g. in tests) does not eagerly build it —
+    important because the production config.yaml sets
+    ``llm.require_user_config=true``, which fails fast when AGENT_SECRET_KEY is
+    unset. Note there must be NO module-level ``app = None`` binding: it would
+    shadow ``__getattr__`` and make ``uvicorn server.main:app`` resolve to
+    ``None``, crashing every request with 500.
+    """
+
+    global app
+    existing = globals().get("app")
+    if existing is None:
+        app = create_app()
+    return app
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
-    uvicorn.run("server.main:app", host=app.state.services.config.server.host, port=app.state.services.config.server.port)
+    uvicorn.run(
+        "server.main:app",
+        host=get_app().state.services.config.server.host,
+        port=get_app().state.services.config.server.port,
+    )
 
 
-__all__ = ["app", "create_app"]
+__all__ = ["app", "create_app", "get_app"]

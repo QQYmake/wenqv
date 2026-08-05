@@ -154,11 +154,13 @@ class AgentCore:
         messages = await self.store.list_messages(session_id)
         return await self.context.generate_title(messages, max_chars=max_chars)
 
-    async def prepare_context(self, session_id: str) -> ContextPreparation:
+    async def prepare_context(
+        self, session_id: str, *, workspace_id: str | None = None
+    ) -> ContextPreparation:
         """Prepare and persist the active context for diagnostics/background work."""
 
         messages = await self.store.list_messages(session_id)
-        prepared = await self.context.prepare(messages)
+        prepared = await self.context.prepare(messages, workspace_id=workspace_id)
         if prepared.changed:
             await self.store.replace_messages(session_id, prepared.messages)
         return prepared
@@ -228,11 +230,13 @@ class AgentCore:
             for turn in range(1, self.config.max_turns + 1):
                 turns = turn
                 _raise_if_cancelled(active.cancel)
-                prepared = await self.prepare_context(session_id)
+                prepared = await self.prepare_context(
+                    session_id, workspace_id=workspace_id
+                )
                 schemas = None if force_final else self.tools.schemas()
                 completed: _CompletedModelTurn | None = None
                 async for item in self._model_turn(
-                    self.clients.get_client("main"),
+                    self.clients.get_client("main", workspace_id),
                     prepared.messages,
                     schemas,
                     active.cancel,

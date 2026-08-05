@@ -4,6 +4,7 @@ import { Composer } from "./components/Composer";
 import { Icon } from "./components/Icon";
 import { MessageList } from "./components/MessageList";
 import { Sidebar } from "./components/Sidebar";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { Welcome } from "./components/Welcome";
 import type { AgentEvent, ChatMessage, PublicConfig, Session, Skill, Theme, ToolTrace } from "./types";
 
@@ -13,6 +14,7 @@ const LakeBackground = lazy(() =>
 
 const THEME_KEY = "blue-lake.theme";
 const SESSION_KEY = "blue-lake.active-session";
+const WORKSPACE_KEY = "blue-lake.workspace-id";
 
 function uniqueId(prefix: string) {
   const uuid = globalThis.crypto?.randomUUID?.();
@@ -153,6 +155,8 @@ export function App({ client = api, renderWater = true }: AppProps) {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [appError, setAppError] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [apiConfigured, setApiConfigured] = useState(true);
   const abortControllerRef = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
   const skipSessionLoadRef = useRef<string | null>(null);
@@ -164,6 +168,21 @@ export function App({ client = api, renderWater = true }: AppProps) {
 
   useEffect(() => () => abortControllerRef.current?.abort(), []);
 
+  const refreshConfiguredState = useCallback(async () => {
+    // Re-read the server's view of the config so the composer unlocks right
+    // after a config is saved in Settings (the initial load may have run
+    // before anything was configured).
+    const configResult = await client.getConfig().catch(() => null);
+    const userConfigResult =
+      typeof client.getUserConfig === "function"
+        ? await client.getUserConfig().catch(() => null)
+        : null;
+    if (configResult) setConfig(configResult);
+    const hasUserConfig = Boolean(userConfigResult?.has_config);
+    const hasDefault = Boolean(configResult?.model_id);
+    setApiConfigured(hasUserConfig || hasDefault);
+  }, [client]);
+
   const refreshSessions = useCallback(async () => {
     const next = await client.listSessions();
     setSessions(next);
@@ -173,11 +192,34 @@ export function App({ client = api, renderWater = true }: AppProps) {
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      const [sessionResult, skillResult, configResult] = await Promise.allSettled([
-        client.listSessions(),
-        client.listSkills(),
-        client.getConfig(),
-      ]);
+      // Issue (or refresh) the workspace identity cookie first so the
+      // AuthMiddleware has a workspace_id for every following request. The
+      // cookie is HttpOnly; we keep a non-sensitive localStorage mirror only
+      // so the UI can show which workspace is active.
+      if (typeof client.bootstrap === "function") {
+        try {
+          const { workspace_id } = await client.bootstrap();
+          if (alive) {
+            try {
+              localStorage.setItem(WORKSPACE_KEY, workspace_id);
+            } catch {
+              // Storage may be unavailable; the cookie is still the source of truth.
+            }
+          }
+        } catch {
+          // Bootstrap is best-effort; header-based identity (tests) still works.
+        }
+      }
+
+      const [sessionResult, skillResult, configResult, userConfigResult] =
+        await Promise.allSettled([
+          client.listSessions(),
+          client.listSkills(),
+          client.getConfig(),
+          typeof client.getUserConfig === "function"
+            ? client.getUserConfig()
+            : Promise.reject(new Error("no user config endpoint")),
+        ]);
       if (!alive) return;
 
       if (sessionResult.status === "fulfilled") {
@@ -193,8 +235,18 @@ export function App({ client = api, renderWater = true }: AppProps) {
       }
       if (skillResult.status === "fulfilled") setSkills(skillResult.value);
       if (configResult.status === "fulfilled") setConfig(configResult.value);
+      if (userConfigResult.status === "fulfilled") {
+        const hasUserConfig = Boolean(userConfigResult.value.has_config);
+        const hasDefault =
+          configResult.status === "fulfilled" && Boolean(configResult.value.model_id);
+        setApiConfigured(hasUserConfig || hasDefault);
+      } else if (configResult.status === "fulfilled") {
+        // No user-config endpoint (e.g. mocked clients): fall back to whether a
+        // default model id is published by the server.
+        setApiConfigured(Boolean(configResult.value.model_id));
+      }
 
-      const failure = [sessionResult, skillResult, configResult].find(
+      const failure = [sessionResult, skillResult, configResult, userConfigResult].find(
         (result): result is PromiseRejectedResult => result.status === "rejected",
       );
       if (failure) setAppError(failure.reason instanceof Error ? failure.reason.message : "部分数据暂时无法读取");
@@ -495,12 +547,14 @@ export function App({ client = api, renderWater = true }: AppProps) {
         expanded={sidebarExpanded}
         loading={loadingSessions}
         theme={theme}
+        apiConfigured={apiConfigured}
         onExpand={() => setSidebarExpanded(true)}
         onNew={beginNewConversation}
         onSelect={selectSession}
         onRename={renameSession}
         onDelete={deleteSession}
         onThemeChange={setTheme}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       {sidebarExpanded && (
@@ -544,9 +598,11 @@ export function App({ client = api, renderWater = true }: AppProps) {
               selectedSkills={selectedSkills}
               streaming={streaming}
               abortEnabled={config.features?.abort !== false}
+              apiConfigured={apiConfigured}
               onChange={setDraft}
               onSubmit={(value) => void sendMessage(value)}
               onAbort={stopCurrentStream}
+              onOpenSettings={() => setSettingsOpen(true)}
               onToggleSkill={(name, selected) =>
                 setSelectedSkills((current) => {
                   const next = new Set(current);
@@ -565,6 +621,14 @@ export function App({ client = api, renderWater = true }: AppProps) {
           <span>{appError}</span>
           <button onClick={() => setAppError(null)} aria-label="关闭提示"><Icon name="close" /></button>
         </div>
+      )}
+
+      {settingsOpen && (
+        <SettingsPanel
+          client={client}
+          onClose={() => setSettingsOpen(false)}
+          onConfigSaved={() => void refreshConfiguredState()}
+        />
       )}
     </div>
   );

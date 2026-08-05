@@ -30,6 +30,7 @@ export function Welcome({ onSuggestion }: { onSuggestion: (prompt: string) => vo
         <p className="welcome-kicker">A QUIET PLACE TO THINK</p>
         <h1 id="welcome-title">今天，我们从哪里开始？</h1>
         <p className="welcome-subtitle">把问题放在这里。工具、Skills 与上下文会在需要时自然加入。</p>
+        <p className="welcome-hint">记住此浏览器以保持你的对话与文件。清除浏览器数据将退出当前工作区。</p>
       </div>
 
       <div className="suggestion-grid" aria-label="建议开场">

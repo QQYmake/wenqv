@@ -60,6 +60,23 @@ export interface PublicConfig {
   };
 }
 
+export interface ProviderConfigView {
+  base_url: string;
+  api_key: string;
+  model: string;
+}
+
+export interface UserLLMConfig {
+  main: ProviderConfigView;
+  summary: ProviderConfigView;
+  has_config: boolean;
+}
+
+export interface UserLLMConfigInput {
+  main: ProviderConfigView;
+  summary: ProviderConfigView;
+}
+
 export type AgentEvent =
   | { type: "text_delta"; delta: string }
   | { type: "tool_call"; call_id: string; name: string; arguments?: unknown }
