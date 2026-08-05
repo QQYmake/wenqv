@@ -9,9 +9,10 @@ takes precedence when both are present.
 
 Requests without a valid ``workspace_id`` are rejected with ``401`` for API
 paths that are not on the public whitelist. Static assets, the SPA fallback,
-``GET /api/bootstrap``, ``GET /api/health``, ``OPTIONS`` preflights, and the
-connection-test endpoint are always reachable so a brand-new visitor can load
-the page and configure its API before any identity exists.
+``GET``/``HEAD /api/bootstrap``, ``GET``/``HEAD /api/health``, ``OPTIONS``
+preflights, and the connection-test endpoint are always reachable so a
+brand-new visitor can load the page and configure its API before any identity
+exists.
 """
 
 from __future__ import annotations
@@ -53,7 +54,9 @@ def _is_whitelisted(request: Request) -> bool:
     path = request.url.path
     if not _is_api_path(path):
         return True
-    if request.method == "GET" and path in _PUBLIC_API_GET:
+    # HEAD is the body-less twin of GET (FastAPI routes HEAD onto GET
+    # handlers), so health probes must be whitelisted exactly like GET.
+    if request.method in ("GET", "HEAD") and path in _PUBLIC_API_GET:
         return True
     if request.method == "POST" and path in _PUBLIC_API_POST:
         return True
