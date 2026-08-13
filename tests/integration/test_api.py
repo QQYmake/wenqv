@@ -237,7 +237,7 @@ def test_project_config_aliases_and_environment_overrides_are_resolved():
     )
     assert config.workspace.id == "default"
     assert config.workspace.root == Path.cwd().resolve()
-    assert config.agent.tool_result_max_chars == 24_000
+    assert config.agent.tool_result_max_chars == 65_536
     assert config.context.preserve_recent_messages == 10
     assert config.llm.summary is not None
     assert config.llm.summary.base_url == config.llm.main.base_url

@@ -92,7 +92,13 @@ describe("App", () => {
         { type: "reasoning_delta", delta: "先检查工具结果。" },
         { type: "skill_loaded", name: "research", already_loaded: false },
         { type: "tool_call", call_id: "call-1", name: "calculator", arguments: { expression: "2+2" } },
-        { type: "tool_result", tool_call_id: "call-1", name: "calculator", result: { value: 4 } },
+        {
+          type: "tool_result",
+          tool_call_id: "call-1",
+          name: "calculator",
+          result: { value: 4 },
+          patch: "--- a/note.txt\n+++ b/note.txt\n-old\n+new\n",
+        },
         { type: "text_delta", delta: "结果是 **4**。" },
         { type: "done", session_id: "new-session", finish_reason: "stop" },
       ],
@@ -107,6 +113,7 @@ describe("App", () => {
     expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText("research")).toBeInTheDocument();
     expect(screen.getByText("calculator")).toBeInTheDocument();
+    expect(screen.getByText("修改差异")).toBeInTheDocument();
     const reasoningLabel = screen.getByText("思考中");
     const reasoningDetails = reasoningLabel.closest("details");
     expect(reasoningDetails).not.toHaveAttribute("open");

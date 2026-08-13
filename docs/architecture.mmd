@@ -12,7 +12,7 @@ flowchart TD
     subgraph CLIENT["① React + Vite SPA — web/src"]
         direction TB
         App["App.tsx<br/>运行时状态枢纽"]
-        UI["组件<br/>Composer（每轮 reasoning_effort）<br/>MessageList（折叠“思考中”）· ExecutionTrace"]
+        UI["组件<br/>Composer（每轮 reasoning_effort）<br/>MessageList（折叠“思考中”）· ExecutionTrace（edit diff）"]
         APICLIENT["api/client.ts<br/>REST 请求 + fetch"]
         SSE["api/sse.ts<br/>parseSSEStream 增量解析"]
         LAKE["LakeBackground.tsx<br/>Three.js 湖面（懒加载）"]
@@ -38,7 +38,8 @@ flowchart TD
         CTX["ContextManager.prepare<br/>token 预算 · summary 摘要 · 确定性截断"]
         SKILL["SkillManager<br/>scan · inject_selected · @mention"]
         REG["ToolRegistry + Tool<br/>校验 · 超时 · 结果截断"]
-        TOOLS["内置工具<br/>calculator · read_file<br/>load_skill · remove_skill"]
+        TOOLS["基础工具<br/>calculator · load_skill · remove_skill"]
+        FILETOOLS["全局文件工具<br/>read · write · edit<br/>grep · find · ls"]
         PORTS["端口 ports.py<br/>ClientResolver · ConversationStore<br/>WorkspaceResolver · LLMClient"]
     end
 
@@ -50,7 +51,7 @@ flowchart TD
         SCACHE["SideCache<br/>内存 TTL + 可选 Redis"]
         UREPO["UserConfigRepository<br/>Fernet 加解密 · 掩码 · 合并默认"]
         RESOLVER["LLMResolverAdapter<br/>每 workspace 解析 · LRU 客户端池"]
-        OAI["OpenAICompatClient<br/>顶层 reasoning_effort<br/>兼容网关摘要尽力提取"]
+        OAI["OpenAICompatClient<br/>顶层 reasoning_effort · 临时图片输入<br/>视觉拒绝后无图重试一次"]
         WRES["IsolatedWorkspaceResolver<br/>per-workspace 文件根"]
     end
 
@@ -61,7 +62,7 @@ flowchart TD
         REDIS[("Redis（可选）")]
         REMOTE["OpenAI 兼容<br/>模型端点"]
         SKILLFILES["skills/*.md"]
-        WFILES["workspace 文件"]
+        WFILES["per-workspace 文件"]
     end
 
     %% ==================== 前端内部 ====================
@@ -85,7 +86,7 @@ flowchart TD
     APICLIENT -->|"POST /api/chat<br/>reasoning_effort + SSE"| CHAT
     CHAT --> SVC
     SVC -->|"AgentAdapter.stream"| ACORE
-    CHAT -.->|"text / reasoning / tool 类型化 SSE"| APICLIENT
+    CHAT -.->|"text / reasoning / tool + edit patch SSE"| APICLIENT
     APICLIENT -->|"POST /api/chat/abort"| CHAT
     SVC -->|"RunCoordinator.request_abort"| ACORE
 
@@ -93,12 +94,13 @@ flowchart TD
     ACORE -->|"prepare_context 每轮"| CTX
     ACORE -->|"inject_selected"| SKILL
     ACORE -->|"tools.execute"| REG
-    REG --> TOOLS
+    REG --> TOOLS & FILETOOLS
     ACORE --> PORTS
     CTX -->|"get_client('summary')"| PORTS
     ACORE -->|"get_client('main')<br/>同一运行继承所选强度"| PORTS
     TOOLS -->|"load_skill / remove_skill"| SKILL
-    TOOLS -->|"read_file"| WFILES
+    FILETOOLS -->|"安全解析 · 读写 · 搜索"| WFILES
+    FILETOOLS -.->|"图片仅当前 run 临时附加"| ACORE
     SKILLFILES -->|"scan"| SKILL
 
     %% ==================== 六边形边界：端口实现 ====================
@@ -108,7 +110,7 @@ flowchart TD
     PORTS -.->|"实现 LLMClient"| OAI
 
     %% ==================== 持久化链路 ====================
-    SADAPTER -->|"回答 + reasoning_summary/effort 元数据"| SQLITE
+    SADAPTER -->|"回答 + reasoning/effort + edit patch 元数据"| SQLITE
     SKILL -->|"inject_skill 去重持久化"| SADAPTER
     SQLITE --> DB
     SQLITE --> SCACHE

@@ -10,6 +10,7 @@ from server.agent import (
     LLMClientFactory,
     LLMResponse,
     LLMStreamChunk,
+    ImageAttachment,
     SkillManager,
     Tool,
     ToolCallDelta,
@@ -90,7 +91,7 @@ def test_multistep_react_loop_streams_two_tools_and_final_answer(tmp_path) -> No
     client = ScriptedClient(
         [
             tool_call("calc-1", "calculator", {"expression": "(17 + 5) * 3"}),
-            tool_call("read-1", "read_file", {"path": "note.txt"}),
+            tool_call("read-1", "read", {"path": "note.txt"}),
             text_response("The result is ", "66 and the file says blue lake."),
         ]
     )
@@ -369,3 +370,34 @@ def test_abort_interrupts_an_in_flight_tool(tmp_path) -> None:
         assert cancelled.is_set()
 
     asyncio.run(scenario())
+
+
+def test_image_tool_result_is_ephemeral_but_reaches_followup_model_turn(tmp_path) -> None:
+    attachment = ImageAttachment(
+        "image.png", "data:image/png;base64,AA==", "image/png", 1, 1
+    )
+
+    async def image_tool(_arguments, _context):
+        from server.agent.registry import ToolOutput
+
+        return ToolOutput("Read image image.png", attachments=(attachment,))
+
+    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    registry = ToolRegistry([Tool("read_image", "read image", schema, image_tool)])
+    client = ScriptedClient(
+        [tool_call("image-1", "read_image", {}), text_response("seen")]
+    )
+    skills = SkillManager(tmp_path / "skills")
+    store = InMemoryConversationStore()
+    core = AgentCore(
+        store=store,
+        clients=LLMClientFactory(client),
+        skills=skills,
+        tools=registry,
+        workspace_root=tmp_path,
+    )
+    events = asyncio.run(collect(core.stream("images", "inspect")))
+    assert events[-1].to_dict()["reason"] == "complete"
+    assert any(message.attachments for message in client.stream_calls[1][0])
+    persisted = asyncio.run(store.list_messages("images"))
+    assert not any(message.attachments for message in persisted)

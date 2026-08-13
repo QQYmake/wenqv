@@ -26,7 +26,7 @@ agent:
   max_turns: 20
   max_tool_retries: 2
   tool_timeout_s: 60
-  tool_result_max_chars: 24000
+  tool_result_max_chars: 65536
 
 context:
   token_budget: 32000

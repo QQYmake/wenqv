@@ -5,7 +5,7 @@ import json
 
 from server.agent.memory import InMemoryConversationStore
 from server.agent.registry import Tool, ToolExecutionContext, ToolRegistry
-from server.agent.tools import calculator_tool, read_file_tool
+from server.agent.tools import calculator_tool, read_tool
 
 
 def _context(tmp_path) -> ToolExecutionContext:
@@ -87,25 +87,25 @@ def test_tool_errors_timeouts_and_truncation_are_standardized(tmp_path) -> None:
     asyncio.run(scenario())
 
 
-def test_read_file_is_confined_to_workspace(tmp_path) -> None:
+def test_read_is_confined_to_workspace(tmp_path) -> None:
     inside = tmp_path / "note.txt"
     inside.write_text("lake", encoding="utf-8")
     outside = tmp_path.parent / "outside-agent-test.txt"
     outside.write_text("secret", encoding="utf-8")
 
     async def scenario() -> None:
-        registry = ToolRegistry([read_file_tool()])
+        registry = ToolRegistry([read_tool()])
         success = await registry.execute(
-            "read_file",
+            "read",
             {"path": "note.txt"},
             _context(tmp_path),
             timeout_s=1,
             max_result_chars=1_000,
         )
-        assert json.loads(success.content)["content"] == "lake"
+        assert success.content == "lake"
 
         denied = await registry.execute(
-            "read_file",
+            "read",
             {"path": str(outside)},
             _context(tmp_path),
             timeout_s=1,
@@ -117,4 +117,3 @@ def test_read_file_is_confined_to_workspace(tmp_path) -> None:
         asyncio.run(scenario())
     finally:
         outside.unlink(missing_ok=True)
-

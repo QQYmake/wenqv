@@ -7,3 +7,5 @@ PyYAML>=6.0,<7.0
 aiosqlite>=0.20,<1.0
 redis>=5.1,<7.0
 cryptography>=42,<46
+Pillow>=10.4,<13.0
+pathspec>=0.12,<1.0

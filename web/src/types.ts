@@ -22,6 +22,8 @@ export interface ToolTrace {
   result?: unknown;
   error?: boolean;
   truncated?: boolean;
+  patch?: string;
+  patchTruncated?: boolean;
   status: "running" | "success" | "error";
 }
 
@@ -92,6 +94,8 @@ export type AgentEvent =
       result?: unknown;
       error?: boolean;
       truncated?: boolean;
+      patch?: string;
+      patch_truncated?: boolean;
     }
   | { type: "skill_loaded"; name: string; already_loaded?: boolean }
   | { type: "error"; message: string; code?: string; recoverable?: boolean }

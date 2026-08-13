@@ -13,6 +13,7 @@ from .memory import InMemoryConversationStore
 from .models import (
     AgentEvent,
     ChatMessage,
+    ImageAttachment,
     LLMResponse,
     LLMStreamChunk,
     ToolCall,
@@ -44,6 +45,7 @@ __all__ = [
     "ContextPreparation",
     "ConversationStore",
     "InMemoryConversationStore",
+    "ImageAttachment",
     "LLMClient",
     "LLMClientFactory",
     "LLMClientProvider",
@@ -68,4 +70,3 @@ __all__ = [
     "estimate_tokens",
     "get_client",
 ]
-

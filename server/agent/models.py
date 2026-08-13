@@ -42,6 +42,17 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageAttachment:
+    """Ephemeral image input carried to a model but never persisted."""
+
+    path: str
+    data_url: str
+    media_type: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     """A provider-neutral chat message.
 
@@ -54,11 +65,26 @@ class ChatMessage:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
     name: str | None = None
+    attachments: tuple[ImageAttachment, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_llm_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"role": self.role}
-        if self.content is not None:
+        if self.attachments:
+            if self.role != "user":
+                raise ValueError("Image attachments are only valid on user messages")
+            parts: list[dict[str, Any]] = []
+            if self.content:
+                parts.append({"type": "text", "text": self.content})
+            parts.extend(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": attachment.data_url, "detail": "auto"},
+                }
+                for attachment in self.attachments
+            )
+            result["content"] = parts
+        elif self.content is not None:
             result["content"] = self.content
         elif self.role == "assistant":
             result["content"] = None
@@ -80,6 +106,8 @@ class ChatMessage:
             ],
             "tool_call_id": self.tool_call_id,
             "name": self.name,
+            # Attachments intentionally remain ephemeral. Persisting their data URLs
+            # would bloat SQLite and keep file contents beyond the active run.
             "metadata": dict(self.metadata),
         }
 

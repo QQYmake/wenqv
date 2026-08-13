@@ -104,7 +104,7 @@ class AgentSettings:
     max_turns: int = 20
     max_tool_retries: int = 2
     tool_timeout_s: float = 60.0
-    tool_result_max_chars: int = 24_000
+    tool_result_max_chars: int = 65_536
 
 
 @dataclass(slots=True)
@@ -310,7 +310,7 @@ def load_config(
                     "AGENT_TOOL_RESULT_MAX_CHARS",
                     agent_data.get("tool_result_max_chars"),
                 ),
-                24_000,
+                65_536,
                 minimum=256,
             ),
         ),
