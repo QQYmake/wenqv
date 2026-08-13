@@ -9,6 +9,7 @@ from typing import Any, Literal, Mapping
 MessageRole = Literal["system", "user", "assistant", "tool"]
 EventType = Literal[
     "text_delta",
+    "reasoning_delta",
     "tool_call",
     "tool_result",
     "skill_loaded",
@@ -128,6 +129,7 @@ class LLMStreamChunk:
     """Provider-neutral streaming response chunk."""
 
     content_delta: str = ""
+    reasoning_delta: str = ""
     tool_call_deltas: tuple[ToolCallDelta, ...] = ()
     finish_reason: str | None = None
 
@@ -139,4 +141,3 @@ class LLMResponse:
     content: str
     tool_calls: tuple[ToolCall, ...] = ()
     finish_reason: str | None = None
-

@@ -14,7 +14,15 @@ from server.storage import AgentStoreAdapter, SQLiteStore
 
 
 EVENT_TYPES = frozenset(
-    {"text_delta", "tool_call", "tool_result", "skill_loaded", "error", "done"}
+    {
+        "text_delta",
+        "reasoning_delta",
+        "tool_call",
+        "tool_result",
+        "skill_loaded",
+        "error",
+        "done",
+    }
 )
 
 
@@ -54,6 +62,7 @@ class AgentAdapter:
         selected_skills: Sequence[str],
         workspace_id: str,
         request_id: str,
+        reasoning_effort: str,
     ) -> AsyncIterator[dict[str, Any]]:
         method = (
             getattr(self.agent, "stream", None)
@@ -70,6 +79,7 @@ class AgentAdapter:
                 selected_skills=tuple(selected_skills),
                 workspace_id=workspace_id,
                 request_id=request_id,
+                reasoning_effort=reasoning_effort,
             )
         except TypeError as first_error:
             try:
@@ -78,6 +88,7 @@ class AgentAdapter:
                     message=message,
                     skills=tuple(selected_skills),
                     request_id=request_id,
+                    reasoning_effort=reasoning_effort,
                 )
             except TypeError:
                 raise first_error

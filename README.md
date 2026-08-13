@@ -8,13 +8,14 @@ It is designed for a trusted private environment: each browser receives a stable
 
 ## What it provides
 
-- **Streaming Agent chat.** A cancellable ReAct loop streams typed SSE events for text, tool calls, tool results, errors, and completion.
+- **Per-turn reasoning effort.** The composer exposes `low`, `medium`, `high`, and `max`; the last choice is remembered locally and sent to every `main` call in that ReAct run.
+- **Streaming Agent chat.** A cancellable ReAct loop streams typed SSE events for text, optional reasoning summaries, tool calls, tool results, errors, and completion.
 - **Persistent conversations.** Create, restore, rename, and delete sessions; messages, tool traces, and loaded Skills are stored in SQLite.
 - **Workspace-scoped state.** A `workspace_id` HttpOnly cookie keeps a browser's sessions and saved model configuration stable across reloads.
 - **Encrypted provider settings.** The Settings panel saves `main` and optional `summary` provider details with Fernet encryption; API keys are only returned to the browser in masked form.
 - **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. The built-ins are `calculator`, workspace-confined `read_file`, `load_skill`, and `remove_skill`.
 - **Bounded execution.** Agent turns, consecutive tool failures, tool timeouts, tool-output size, and context size are configurable limits.
-- **Responsive chat UI.** The frontend supports GFM Markdown, code highlighting, collapsible execution traces, light/dark themes, a bundled local font, and a lazy-loaded Three.js lake background with a reduced-motion fallback.
+- **Responsive chat UI.** The frontend shows a compact, collapsed `Thinking` row instead of exposing reasoning inline; compatible plaintext summaries can be expanded, while tool traces remain separate.
 - **Durable local storage.** SQLite is the source of truth. Redis is optional and used only as a best-effort side cache; an in-memory TTL cache is always available.
 
 ## Architecture
@@ -37,14 +38,16 @@ The important dependency rule is: **the Agent Core depends on ports, not FastAPI
 
 1. The SPA calls `GET /api/bootstrap`; the server reuses or creates an HttpOnly `workspace_id` cookie.
 2. The SPA loads sessions, Skills, public limits, and masked user configuration. Private API requests are then scoped to that workspace by `AuthMiddleware`.
-3. A message goes to `POST /api/chat`. The API validates the session and model configuration, allows one active run per workspace/session, then opens an SSE stream.
-4. `AgentCore` persists the user message, injects selected/mentioned Skills, prepares a token-budgeted context, calls the `main` model, and executes any requested tools within configured limits.
-5. Typed events flow back as SSE frames and are reduced into text and execution traces by `App.tsx`. `POST /api/chat/abort` requests cooperative cancellation.
+3. A message and its `reasoning_effort` go to `POST /api/chat`. The API accepts exactly `low`, `medium`, `high`, or `max`, allows one active run per workspace/session, then opens an SSE stream.
+4. `AgentCore` applies that effort unchanged to every `main` model call in the run. The separate `summary` role does not inherit it.
+5. Text, best-effort plaintext reasoning summaries, and tool events flow back as typed SSE. The assistant answer and reasoning metadata are persisted under one request id so history restores as one turn.
 
 ### Context and model roles
 
 - `main` is required for chat. It is the model used for streaming responses and tool calls.
 - `summary` is optional. It is used for context compression and first-message titles when its configuration is complete. If it fails or is unavailable, chat remains available: title generation falls back to the first prompt and context compression falls back to deterministic trimming.
+- `reasoning_effort` is sent as a top-level Chat Completions parameter with no model-specific remapping or silent fallback. Unsupported model/effort pairs surface through the normal error path.
+- Chat Completions has no official reasoning-summary contract. The adapter only forwards direct plaintext from compatible gateway fields (`reasoning_content`, `reasoning`, or `thinking`) and ignores structured/opaque payloads.
 - `ContextManager` estimates mixed Chinese/English tokens, preserves recent messages and Skill injections, and keeps an assistant tool call with its tool replies as one atomic group.
 
 ### Skills and tool safety
@@ -149,7 +152,7 @@ The checked-in `config.yaml` sets `llm.require_user_config: true`. In that mode,
 | `GET /api/skills`, `GET /api/config` | Discover Skills and browser-safe runtime information |
 | `GET` / `PUT /api/user/config` | Read masked and write encrypted model settings |
 | `POST /api/user/config/test` | Probe submitted provider roles without saving them |
-| `POST /api/chat` | Start the typed SSE chat stream |
+| `POST /api/chat` | Start SSE chat; body includes `reasoning_effort` (`low` / `medium` / `high` / `max`, default `medium`) |
 | `POST /api/chat/abort` | Request cooperative cancellation of an active run |
 | `GET /api/health` | Health check |
 

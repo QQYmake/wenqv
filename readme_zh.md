@@ -8,13 +8,14 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 
 ## 已实现能力
 
-- **流式 Agent 对话。** 可取消的 ReAct 循环会持续发送类型化 SSE 事件：文本、工具调用、工具结果、错误与完成状态。
+- **每轮思考强度。** 输入框左下角可选 `low`、`medium`、`high`、`max`，浏览器记住上次选择，并应用到该轮 ReAct 的全部 `main` 调用。
+- **流式 Agent 对话。** 可取消的 ReAct 循环会持续发送文本、可用的思考摘要、工具调用、工具结果、错误与完成状态。
 - **持久化会话。** 可创建、恢复、重命名和删除会话；消息、工具执行轨迹与已加载 Skills 保存在 SQLite 中。
 - **按 workspace 隔离的状态。** `workspace_id` HttpOnly Cookie 让浏览器刷新后仍能访问同一组会话和已保存的模型配置。
 - **加密的模型设置。** 设置面板保存 `main` 和可选 `summary` 两个角色的配置，并用 Fernet 加密 API key；浏览器只能得到掩码后的 key。
 - **Skills 与工具。** 可信 Markdown Skills 可在 UI 中选择、通过 `@skill-name` 提及，或由工具管理。内置工具为 `calculator`、限定 workspace 的 `read_file`、`load_skill` 与 `remove_skill`。
 - **有界执行。** Agent 轮数、连续工具失败次数、工具超时、工具输出大小和上下文大小都可配置。
-- **响应式聊天界面。** 前端支持 GFM Markdown、代码高亮、可折叠执行轨迹、明暗主题、本地打包字体，以及懒加载的 Three.js 湖面和 reduced-motion fallback。
+- **低干扰聊天界面。** 助手回合只固定显示一行默认折叠的“思考中”；兼容端点返回纯文本摘要时可点击展开，工具轨迹仍单独可见。
 - **可靠的本地存储。** SQLite 是事实数据源。Redis 仅作为可选的尽力而为旁路缓存；内存 TTL 缓存始终可用。
 
 ## 总体架构
@@ -37,14 +38,16 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 
 1. SPA 调用 `GET /api/bootstrap`；服务端创建或复用 HttpOnly `workspace_id` Cookie。
 2. SPA 加载会话、Skills、公开运行限制和掩码后的用户配置。此后，`AuthMiddleware` 将私有 API 请求限定在当前 workspace。
-3. 消息发往 `POST /api/chat`。API 校验会话和模型配置，并保证每个 workspace/session 同时至多有一个运行，然后打开 SSE 流。
-4. `AgentCore` 持久化用户消息，注入已选择或 `@mention` 的 Skills，准备满足 token 预算的上下文，调用 `main` 模型，并在配置限制内执行模型请求的工具。
-5. 类型化事件以 SSE 帧回到前端，由 `App.tsx` 归约为文本和执行轨迹。`POST /api/chat/abort` 会请求协作式取消。
+3. 消息连同 `reasoning_effort` 发往 `POST /api/chat`；API 只接受 `low`、`medium`、`high`、`max`，随后打开 SSE 流。
+4. `AgentCore` 将所选强度原样应用到该次运行的每个 `main` 调用；独立的 `summary` 角色不继承它。
+5. 回答、尽力提取的纯文本思考摘要和工具事件以类型化 SSE 返回。回答与思考元数据按同一 `request_id` 持久化，刷新后仍合并为一个助手回合。
 
 ### 上下文与模型角色
 
 - `main` 是对话必需角色，负责流式回答和工具调用。
 - `summary` 是可选角色；配置完整时用于上下文压缩和首条消息标题。它不可用或失败时，对话仍可继续：标题回退为首条提示词，上下文压缩回退为确定性裁剪。
+- `reasoning_effort` 作为 Chat Completions 顶层参数发送，不做模型特定映射，也不静默降档；模型不支持某个档位时沿用现有可读错误链路。
+- Chat Completions 没有官方思考摘要契约。适配器只转发兼容网关在 `reasoning_content`、`reasoning` 或 `thinking` 中提供的直接纯文本，并忽略结构化或不透明内容。
 - `ContextManager` 会估算中英文混合 token，保留近期消息与 Skill 注入，并把一条 assistant 工具调用和其工具回复视为不可拆分的一组。
 
 ### Skills 与工具安全
@@ -149,7 +152,7 @@ npm run dev
 | `GET /api/skills`、`GET /api/config` | 获取 Skills 与浏览器安全的运行时信息 |
 | `GET` / `PUT /api/user/config` | 读取掩码设置、写入加密模型设置 |
 | `POST /api/user/config/test` | 不保存地探测提交的模型角色 |
-| `POST /api/chat` | 开始类型化 SSE 对话流 |
+| `POST /api/chat` | 开始 SSE 对话；body 含 `reasoning_effort`（四档，默认 `medium`） |
 | `POST /api/chat/abort` | 请求协作式取消当前运行 |
 | `GET /api/health` | 健康检查 |
 

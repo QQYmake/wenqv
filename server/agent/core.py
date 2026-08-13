@@ -59,6 +59,7 @@ class _ToolCallBuffer:
 class _CompletedModelTurn:
     content: str
     calls: tuple[ToolCall, ...]
+    reasoning_summary: str = ""
 
 
 def build_default_registry(skills: SkillManager) -> ToolRegistry:
@@ -115,6 +116,7 @@ class AgentCore:
         *,
         workspace_id: str | None = None,
         request_id: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> AsyncIterator[AgentEvent]:
         return self._stream(
             session_id,
@@ -122,6 +124,7 @@ class AgentCore:
             selected_skills,
             workspace_id=workspace_id,
             request_id=request_id,
+            reasoning_effort=reasoning_effort,
         )
 
     def run_stream(
@@ -132,6 +135,7 @@ class AgentCore:
         *,
         workspace_id: str | None = None,
         request_id: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> AsyncIterator[AgentEvent]:
         """Compatibility alias for delivery adapters."""
 
@@ -141,6 +145,7 @@ class AgentCore:
             selected_skills,
             workspace_id=workspace_id,
             request_id=request_id,
+            reasoning_effort=reasoning_effort,
         )
 
     async def abort(self, session_id: str, request_id: str | None = None) -> bool:
@@ -173,6 +178,7 @@ class AgentCore:
         *,
         workspace_id: str | None,
         request_id: str | None,
+        reasoning_effort: str,
     ) -> AsyncIterator[AgentEvent]:
         run_id = request_id or uuid.uuid4().hex
         if not session_id.strip():
@@ -242,6 +248,7 @@ class AgentCore:
                     active.cancel,
                     turn,
                     run_id,
+                    reasoning_effort,
                 ):
                     if isinstance(item, AgentEvent):
                         yield item
@@ -251,14 +258,19 @@ class AgentCore:
                     raise RuntimeError("LLM stream ended without a completed turn")
 
                 content, calls = completed.content, completed.calls
-                if content or calls:
+                if content or calls or completed.reasoning_summary:
                     await self.store.add_message(
                         session_id,
                         ChatMessage(
                             role="assistant",
                             content=content or None,
                             tool_calls=calls,
-                            metadata={"request_id": run_id, "turn": turn},
+                            metadata={
+                                "request_id": run_id,
+                                "turn": turn,
+                                "reasoning_effort": reasoning_effort,
+                                "reasoning_summary": completed.reasoning_summary,
+                            },
                         ),
                     )
 
@@ -395,10 +407,16 @@ class AgentCore:
         cancel: asyncio.Event,
         turn: int,
         request_id: str,
+        reasoning_effort: str,
     ) -> AsyncIterator[AgentEvent | _CompletedModelTurn]:
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         buffers: dict[int, _ToolCallBuffer] = {}
-        stream = client.stream(messages, tools=tools)
+        stream = client.stream(
+            messages,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+        )
         if inspect.isawaitable(stream):
             stream = await _await_or_cancel(stream, cancel)
         iterator = stream.__aiter__()
@@ -419,6 +437,16 @@ class AgentCore:
                         "request_id": request_id,
                     },
                 )
+            if chunk.reasoning_delta:
+                reasoning_parts.append(chunk.reasoning_delta)
+                yield AgentEvent(
+                    "reasoning_delta",
+                    {
+                        "delta": chunk.reasoning_delta,
+                        "turn": turn,
+                        "request_id": request_id,
+                    },
+                )
             for delta in chunk.tool_call_deltas:
                 buffer = buffers.setdefault(delta.index, _ToolCallBuffer())
                 if delta.id:
@@ -435,7 +463,11 @@ class AgentCore:
             )
             for index, buffer in sorted(buffers.items())
         )
-        yield _CompletedModelTurn("".join(content_parts), calls)
+        yield _CompletedModelTurn(
+            "".join(content_parts),
+            calls,
+            "".join(reasoning_parts),
+        )
 
     async def _persist_tool_result(
         self,
@@ -622,4 +654,3 @@ def _done(reason: str, request_id: str, *, turns: int) -> AgentEvent:
     return AgentEvent(
         "done", {"reason": reason, "turns": turns, "request_id": request_id}
     )
-

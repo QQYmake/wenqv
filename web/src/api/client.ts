@@ -2,6 +2,7 @@ import type {
   AgentEvent,
   ChatMessage,
   PublicConfig,
+  ReasoningEffort,
   Session,
   Skill,
   UserLLMConfig,
@@ -144,7 +145,12 @@ export const api = {
   },
 
   async *streamChat(
-    body: { session_id: string; message: string; skills?: string[] },
+    body: {
+      session_id: string;
+      message: string;
+      reasoning_effort: ReasoningEffort;
+      skills?: string[];
+    },
     signal: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
     const response = await fetch(`${API_BASE}/api/chat`, {

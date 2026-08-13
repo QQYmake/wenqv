@@ -55,8 +55,8 @@ class ScriptedClient:
         self.scripts = list(scripts)
         self.stream_calls = []
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
-        self.stream_calls.append((tuple(messages), tools, max_tokens))
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
+        self.stream_calls.append((tuple(messages), tools, max_tokens, reasoning_effort))
         if not self.scripts:
             raise AssertionError("No scripted LLM turn remains")
         script = self.scripts.pop(0)
@@ -120,6 +120,45 @@ def test_multistep_react_loop_streams_two_tools_and_final_answer(tmp_path) -> No
         "assistant",
     ]
     assert json.loads(messages[2].content)["value"] == 66
+
+
+def test_reasoning_effort_and_summary_cover_every_main_turn(tmp_path) -> None:
+    client = ScriptedClient(
+        [
+            [
+                LLMStreamChunk(reasoning_delta="先计算。"),
+                *tool_call("calc-1", "calculator", {"expression": "2+2"}),
+            ],
+            [
+                LLMStreamChunk(reasoning_delta="再整理答案。"),
+                *text_response("结果是 4。"),
+            ],
+        ]
+    )
+    core, store = make_core(tmp_path, client)
+
+    events = asyncio.run(
+        collect(core.stream("s1", "计算 2+2", reasoning_effort="max"))
+    )
+    payloads = [event.to_dict() for event in events]
+
+    assert [call[3] for call in client.stream_calls] == ["max", "max"]
+    assert "".join(
+        event["delta"] for event in payloads if event["type"] == "reasoning_delta"
+    ) == "先计算。再整理答案。"
+    assistants = [
+        message
+        for message in asyncio.run(store.list_messages("s1"))
+        if message.role == "assistant"
+    ]
+    assert [message.metadata["reasoning_effort"] for message in assistants] == [
+        "max",
+        "max",
+    ]
+    assert [message.metadata["reasoning_summary"] for message in assistants] == [
+        "先计算。",
+        "再整理答案。",
+    ]
 
 
 def test_tool_error_returns_to_model_and_does_not_crash_loop(tmp_path) -> None:
@@ -260,7 +299,7 @@ def test_abort_interrupts_a_blocked_model_stream(tmp_path) -> None:
             self.started = asyncio.Event()
             self.cancelled = asyncio.Event()
 
-        async def stream(self, messages, *, tools=None, max_tokens=None):
+        async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
             self.started.set()
             try:
                 await asyncio.Future()

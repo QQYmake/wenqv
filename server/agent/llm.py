@@ -142,6 +142,9 @@ class OpenAICompatClient:
             request["max_tokens"] = max_tokens
         if self.config.temperature is not None:
             request["temperature"] = self.config.temperature
+        reasoning_effort = overrides.get("reasoning_effort")
+        if reasoning_effort is not None:
+            request["reasoning_effort"] = reasoning_effort
         if self.config.extra_body:
             request["extra_body"] = dict(self.config.extra_body)
         return request
@@ -179,9 +182,15 @@ class OpenAICompatClient:
         *,
         tools: Sequence[dict] | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         response = await self._client().chat.completions.create(
-            **self._request(messages, tools=tools, max_tokens=max_tokens),
+            **self._request(
+                messages,
+                tools=tools,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+            ),
             stream=True,
         )
         async for chunk in response:
@@ -206,9 +215,30 @@ class OpenAICompatClient:
             )
             yield LLMStreamChunk(
                 content_delta=getattr(delta, "content", None) or "",
+                reasoning_delta=_reasoning_text(delta),
                 tool_call_deltas=tool_deltas,
                 finish_reason=getattr(choice, "finish_reason", None),
             )
+
+
+def _reasoning_text(delta: Any) -> str:
+    """Extract plaintext summaries exposed by compatible Chat gateways.
+
+    These fields are not an official Chat Completions summary contract. Only
+    direct strings are forwarded; structured or opaque payloads are ignored.
+    """
+
+    for name in ("reasoning_content", "reasoning", "thinking"):
+        value = getattr(delta, name, None)
+        if isinstance(value, str):
+            return value
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, Mapping):
+        for name in ("reasoning_content", "reasoning", "thinking"):
+            value = extra.get(name)
+            if isinstance(value, str):
+                return value
+    return ""
 
 
 ClientBuilder = Callable[[LLMConfig], LLMClient]

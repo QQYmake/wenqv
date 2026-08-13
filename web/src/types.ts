@@ -1,4 +1,5 @@
 export type Theme = "light" | "dark";
+export type ReasoningEffort = "low" | "medium" | "high" | "max";
 
 export interface Session {
   id: string;
@@ -44,6 +45,8 @@ export interface ChatMessage {
   skills?: SkillNotice[];
   pending?: boolean;
   error?: string;
+  reasoningSummary?: string;
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface PublicConfig {
@@ -79,6 +82,7 @@ export interface UserLLMConfigInput {
 
 export type AgentEvent =
   | { type: "text_delta"; delta: string }
+  | { type: "reasoning_delta"; delta: string }
   | { type: "tool_call"; call_id: string; name: string; arguments?: unknown }
   | {
       type: "tool_result";
