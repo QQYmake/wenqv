@@ -35,7 +35,7 @@ if "%AGENT_SECRET_KEY%"=="" (
     if exist ".agent_secret_key" (
         set /p AGENT_SECRET_KEY=<.agent_secret_key
     ) else (
-        "%PYTHON%" -c "import secrets; open('.agent_secret_key', 'w', encoding='utf-8').write(secrets.token_urlsafe(32))"
+        "%PYTHON%" -c "from cryptography.fernet import Fernet; open('.agent_secret_key', 'w', encoding='utf-8').write(Fernet.generate_key().decode())"
         set /p AGENT_SECRET_KEY=<.agent_secret_key
     )
 )

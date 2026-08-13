@@ -1,115 +1,139 @@
-%% Blue Lake Agent — 完整代码架构（主代理亲自梳理后重绘）
-%% 分层：浏览器 → React SPA → FastAPI 传输层 → HTTP 无关 Agent Core → 出站适配器 → 外部资源
-%% 实线 = 运行时依赖/调用；虚线 = 启动装配、装饰或可选路径；粗实线 = 主聊天流
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "LXGW WenKai Lite, LXGW WenKai, serif", "background": "#f5f1e5", "primaryColor": "#e6eee8", "primaryTextColor": "#173330", "primaryBorderColor": "#648f85", "lineColor": "#47766f", "secondaryColor": "#f0dfbd", "tertiaryColor": "#d8e6e1", "clusterBkg": "#f8f5ea", "clusterBorder": "#8ca89f", "edgeLabelBackground": "#f8f5ea"}, "flowchart": {"curve": "basis", "nodeSpacing": 24, "rankSpacing": 42}}}%%
-flowchart TB
-  USER["User / Browser<br/>用户浏览器"]
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "13px", "fontFamily": "Segoe UI, Microsoft YaHei, sans-serif"}, "flowchart": {"nodeSpacing": 40, "rankSpacing": 55, "curve": "basis", "padding": 8}}}%%
+flowchart TD
+    %% ==================== 样式 ====================
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
+    classDef api fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+    classDef core fill:#fef9c3,stroke:#ca8a04,stroke-width:1.5px,color:#713f12
+    classDef adapter fill:#f3e8ff,stroke:#9333ea,stroke-width:1.5px,color:#4c1d95
+    classDef port fill:#ffedd5,stroke:#ea580c,stroke-width:1.5px,color:#7c2d12,stroke-dasharray:6 4
+    classDef ext fill:#e5e7eb,stroke:#6b7280,stroke-width:1.5px,color:#111827
 
-  subgraph WEB["React + Vite SPA · web/src"]
-    direction LR
-    APP["App.tsx<br/>bootstrap → 四路并行加载<br/>sendMessage · hydrateHistory<br/>handleAgentEvent 事件归约"]
-    VIEW["components/<br/>Sidebar · Composer · MessageList<br/>ExecutionTrace · Markdown · SettingsPanel"]
-    CLIENT["api/client.ts + api/sse.ts<br/>REST · fetch 流式 SSE 解析<br/>streamChat · abortChat"]
-    SCENE["scene/LakeBackground 懒加载<br/>theme/styles.css 设计令牌"]
+    %% ==================== ① 前端 ====================
+    subgraph CLIENT["① React + Vite SPA — web/src"]
+        direction TB
+        App["App.tsx<br/>运行时状态枢纽"]
+        UI["组件<br/>Composer · Sidebar · SettingsPanel<br/>MessageList · ExecutionTrace"]
+        APICLIENT["api/client.ts<br/>REST 请求 + fetch"]
+        SSE["api/sse.ts<br/>parseSSEStream 增量解析"]
+        LAKE["LakeBackground.tsx<br/>Three.js 湖面（懒加载）"]
+    end
 
-    VIEW <--> APP
-    APP --> CLIENT
-    VIEW -.-> SCENE
-  end
+    %% ==================== ② FastAPI 传输层 ====================
+    subgraph API["② FastAPI 传输层 — server/api + server/main"]
+        direction TB
+        MAIN["main.py<br/>懒加载组合根<br/>create_app / __getattr__"]
+        AUTH["AuthMiddleware<br/>cookie → X-Workspace-ID · 401 守卫"]
+        DEPS["dependencies.py<br/>get_workspace_id / get_services"]
+        CHAT["chat.py<br/>SSE 编码 · 404/412/409 · 取消协调"]
+        SESSIONS["sessions.py<br/>workspace 作用域 CRUD"]
+        META["meta.py<br/>/api/bootstrap · /api/skills · /api/config"]
+        UCFG["user_config.py<br/>掩码读 · 加密写 · 连接探测"]
+        SVC["services.py<br/>APIServices · AgentAdapter · RunCoordinator"]
+    end
 
-  subgraph API["FastAPI 传输与组合 · server/api + server/main"]
-    direction LR
-    ROOT["main.py 懒加载组合根<br/>create_app · __getattr__ · 中间件栈<br/>SPAStaticFiles · Fernet fail-fast"]
-    AUTH["middleware/auth.py<br/>cookie/header → X-Workspace-ID<br/>公开白名单 · 401 守卫"]
-    ROUTES["chat.py + sessions.py<br/>schemas.py · dependencies.py<br/>SSE 流 · abort · 会话 CRUD<br/>412 未配置 · 409 运行冲突"]
-    META["meta.py<br/>bootstrap 身份 cookie<br/>skills 目录 · public config"]
-    UCONFIG["user_config.py<br/>掩码读 · 加密写 · 按角色测试"]
-    SERVICES["services.py<br/>APIServices · RunCoordinator<br/>AgentAdapter · SkillCatalogAdapter"]
+    %% ==================== ③ Agent Core ====================
+    subgraph CORE["③ 与 HTTP 无关的 Agent Core — server/agent"]
+        direction TB
+        ACORE["AgentCore._stream<br/>可取消 ReAct 循环"]
+        CTX["ContextManager.prepare<br/>token 预算 · summary 摘要 · 确定性截断"]
+        SKILL["SkillManager<br/>scan · inject_selected · @mention"]
+        REG["ToolRegistry + Tool<br/>校验 · 超时 · 结果截断"]
+        TOOLS["内置工具<br/>calculator · read_file<br/>load_skill · remove_skill"]
+        PORTS["端口 ports.py<br/>ClientResolver · ConversationStore<br/>WorkspaceResolver · LLMClient"]
+    end
 
-    ROOT -.-> AUTH
-    ROOT -.-> ROUTES
-    ROOT -.-> META
-    ROOT -.-> UCONFIG
-    ROOT -.-> SERVICES
-    AUTH -.-> ROUTES
-    AUTH -.-> META
-    AUTH -.-> UCONFIG
-    ROUTES --> SERVICES
-    META --> SERVICES
-  end
+    %% ==================== ④ 出站适配器 ====================
+    subgraph ADAPT["④ 出站适配器 — server/storage + llm_resolver + agent/llm.py"]
+        direction TB
+        SADAPTER["AgentStoreAdapter<br/>SQLite 记录 ↔ ChatMessage"]
+        SQLITE["SQLiteStore<br/>WAL · asyncio.to_thread · BEGIN IMMEDIATE"]
+        SCACHE["SideCache<br/>内存 TTL + 可选 Redis"]
+        UREPO["UserConfigRepository<br/>Fernet 加解密 · 掩码 · 合并默认"]
+        RESOLVER["LLMResolverAdapter<br/>每 workspace 解析 · LRU 客户端池"]
+        OAI["OpenAICompatClient<br/>OpenAI SDK 适配"]
+        WRES["IsolatedWorkspaceResolver<br/>per-workspace 文件根"]
+    end
 
-  subgraph CORE["HTTP 无关 Agent 核心 · server/agent"]
-    direction LR
-    LOOP["core.py AgentCore._stream<br/>可取消 ReAct 循环<br/>max_turns · 重试 · 超时 · 截断"]
-    CTX["context.py ContextManager<br/>token 预算 · summary 摘要<br/>确定性截断 · 标题生成"]
-    SKILLS["skills.py + registry.py + tools/<br/>SkillManager · ToolRegistry<br/>calculator · read_file · load/remove_skill"]
-    PORTS["ports.py + models.py<br/>ClientResolver · ConversationStore<br/>WorkspaceResolver · LLMClient"]
+    %% ==================== ⑤ 外部 ====================
+    subgraph EXT["⑤ 外部 / 持久化"]
+        direction TB
+        DB[("SQLite 文件")]
+        REDIS[("Redis（可选）")]
+        REMOTE["OpenAI 兼容<br/>模型端点"]
+        SKILLFILES["skills/*.md"]
+        WFILES["workspace 文件"]
+    end
 
-    LOOP --> CTX
-    LOOP --> SKILLS
-    LOOP --> PORTS
-    CTX --> PORTS
-    SKILLS --> PORTS
-  end
+    %% ==================== 前端内部 ====================
+    App --> APICLIENT
+    APICLIENT --> SSE
+    App --> UI
+    App -.-> LAKE
 
-  subgraph INFRA["出站适配器与装配 · server/storage + server/llm_resolver + server/config"]
-    direction LR
-    RESOLVER["llm_resolver.py LLMResolverAdapter<br/>用户配置 ⊕ 默认配置<br/>warm · 客户端池 LRU(32)"]
-    LLMCLIENT["agent/llm.py OpenAICompatClient<br/>懒加载 openai.AsyncOpenAI<br/>complete · stream · summary 回退"]
-    REPO["storage/user_configs.py<br/>UserConfigRepository · Fernet<br/>get_resolved · 掩码 · 留空保留"]
-    ADAPTER["storage/agent_adapter.py<br/>AgentStoreAdapter<br/>ConversationStore 实现"]
-    STORE["storage/sqlite.py SQLiteStore<br/>WAL · to_thread · BEGIN IMMEDIATE<br/>6 张表 · SideCache 失效"]
-    CACHE["storage/cache.py SideCache<br/>内存 TTL 兜底 · Redis 可选"]
-    WS["storage/workspace.py<br/>IsolatedWorkspaceResolver<br/>每 workspace 文件根"]
-    CFG["config.py + config.yaml<br/>AGENT_* 环境变量覆盖"]
+    %% ==================== 身份 / 配置链路 ====================
+    APICLIENT -->|"GET /api/bootstrap"| META
+    META -->|"Set-Cookie workspace_id"| APICLIENT
+    APICLIENT -->|"所有 API 请求"| AUTH
+    AUTH --> DEPS
+    DEPS --> CHAT & SESSIONS & META & UCFG
+    APICLIENT -->|"PUT /api/user/config"| UCFG
+    UCFG -->|"掩码读 / 加密写"| UREPO
+    UCFG -->|"warm() 失效缓存"| RESOLVER
 
-    RESOLVER --> LLMCLIENT
-    RESOLVER --> REPO
-    ADAPTER --> STORE
-    STORE --> CACHE
-    CFG -.-> ROOT
-    CFG -.-> RESOLVER
-  end
+    %% ==================== 聊天 / 取消链路 ====================
+    APICLIENT -->|"POST /api/chat（SSE）"| CHAT
+    CHAT --> SVC
+    SVC -->|"AgentAdapter.stream"| ACORE
+    CHAT -.->|"类型化 SSE 帧回流"| APICLIENT
+    APICLIENT -->|"POST /api/chat/abort"| CHAT
+    SVC -->|"RunCoordinator.request_abort"| ACORE
 
-  DB[("SQLite agent.db<br/>workspaces · sessions · messages<br/>session_skills · user_configs")]
-  REMOTE[["OpenAI-compatible API<br/>main 对话 · summary 摘要/标题"]]
-  REDIS[("Redis · 可选旁路缓存")]
-  SKILLFILES[("skills/*.md<br/>可信模型指令")]
-  WORKSPACEFILES[("workspace 私有文件<br/>read_file 安全根")]
-  SECRET[("AGENT_SECRET_KEY<br/>Fernet 主密钥<br/>start.bat 持久化 .agent_secret_key")]
+    %% ==================== Agent Core 内部 ====================
+    ACORE -->|"prepare_context 每轮"| CTX
+    ACORE -->|"inject_selected"| SKILL
+    ACORE -->|"tools.execute"| REG
+    REG --> TOOLS
+    ACORE --> PORTS
+    CTX -->|"get_client('summary')"| PORTS
+    ACORE -->|"get_client('main')"| PORTS
+    TOOLS -->|"load_skill / remove_skill"| SKILL
+    TOOLS -->|"read_file"| WFILES
+    SKILLFILES -->|"scan"| SKILL
 
-  USER --> APP
-  CLIENT -->|"GET/POST JSON REST"| META
-  CLIENT -->|"GET/PUT/POST config"| UCONFIG
-  CLIENT ==>|"POST /api/chat<br/>SSE 事件流"| ROUTES
-  CLIENT -.->|"POST /api/chat/abort<br/>协作取消"| ROUTES
-  UCONFIG -->|"读写加密配置"| REPO
-  UCONFIG -.->|"PUT 后 warm 失效"| RESOLVER
-  SERVICES ==>|"AgentAdapter.stream / abort<br/>AgentEvent"| LOOP
-  ROUTES -.->|"首条消息标题 best-effort"| CTX
-  SERVICES -->|"会话/消息直查（API 路径）"| STORE
-  PORTS -->|"ConversationStore 端口"| ADAPTER
-  PORTS -->|"ClientResolver 端口"| RESOLVER
-  PORTS -->|"WorkspaceResolver 端口"| WS
-  CTX -->|"get_client(main/summary)"| PORTS
-  SKILLS --> SKILLFILES
-  SKILLS -->|"read_file 经 workspace_root"| WORKSPACEFILES
-  LLMCLIENT --> REMOTE
-  REPO --> SECRET
-  STORE --> DB
-  CACHE --> REDIS
-  ROOT -->|"托管 web/dist + SPA 回退"| CLIENT
+    %% ==================== 六边形边界：端口实现 ====================
+    PORTS -.->|"实现 ClientResolver"| RESOLVER
+    PORTS -.->|"实现 ConversationStore"| SADAPTER
+    PORTS -.->|"实现 WorkspaceResolver"| WRES
+    PORTS -.->|"实现 LLMClient"| OAI
 
-  classDef actor fill:#173f3a,stroke:#173f3a,color:#ffffff,stroke-width:2px;
-  classDef browser fill:#e6eee8,stroke:#648f85,color:#173330,stroke-width:1.4px;
-  classDef application fill:#ece7d9,stroke:#8c8063,color:#2e342f,stroke-width:1.4px;
-  classDef core fill:#f0dfbd,stroke:#a57832,color:#3a2b18,stroke-width:1.5px;
-  classDef infrastructure fill:#d8e6e1,stroke:#638c83,color:#173330,stroke-width:1.4px;
-  classDef resource fill:#e8dfd0,stroke:#9a8a6a,color:#3a3428,stroke-width:1.2px;
+    %% ==================== 持久化链路 ====================
+    SADAPTER --> SQLITE
+    SKILL -->|"inject_skill 去重持久化"| SADAPTER
+    SQLITE --> DB
+    SQLITE --> SCACHE
+    SCACHE --> REDIS
+    SESSIONS --> SQLITE
+    CHAT --> SQLITE
+    UREPO --> SQLITE
 
-  class USER actor;
-  class APP,VIEW,CLIENT,SCENE browser;
-  class ROOT,AUTH,ROUTES,META,UCONFIG,SERVICES application;
-  class LOOP,CTX,SKILLS,PORTS core;
-  class RESOLVER,LLMCLIENT,REPO,ADAPTER,STORE,CACHE,WS,CFG infrastructure;
-  class DB,REMOTE,REDIS,SKILLFILES,WORKSPACEFILES,SECRET resource;
+    %% ==================== 出站 ====================
+    RESOLVER -->|"读取加密配置 + 合并默认"| UREPO
+    RESOLVER -->|"构建 / 池化客户端"| OAI
+    OAI -->|"stream / complete"| REMOTE
+    WRES --> WFILES
+
+    %% ==================== 组合根 ====================
+    MAIN -.->|"装配 APIServices"| SVC
+    MAIN -.->|"构建 store + SideCache"| SQLITE
+    MAIN -.->|"构建 ClientResolver"| RESOLVER
+    MAIN -.->|"懒加载组合 AgentCore"| ACORE
+
+    %% ==================== 图例 ====================
+    subgraph LEGEND["图例"]
+        L1["前端"]:::client
+        L2["FastAPI 传输层"]:::api
+        L3["Agent Core"]:::core
+        L4["出站适配器"]:::adapter
+        L5["端口（抽象）"]:::port
+        L6["外部 / 持久化"]:::ext
+    end

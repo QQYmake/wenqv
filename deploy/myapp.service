@@ -1,0 +1,55 @@
+# /etc/systemd/system/myapp.service
+# Blue Lake Agent - FastAPI backend served behind nginx on Ubuntu.
+#
+# Install:
+#   sudo cp deploy/myapp.service /etc/systemd/system/myapp.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now myapp
+#
+# Generate the fixed Fernet key ONCE and paste it into Environment= below:
+#   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+[Unit]
+Description=Blue Lake Agent (FastAPI/uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+# Project root - adjust to your deploy path. Relative paths in config.yaml
+# (data/agent.db, web/dist, skills/) resolve against this directory.
+WorkingDirectory=/opt/myapp
+
+# Python venv inside the project. Adjust if you install deps system-wide.
+Environment=PATH=/opt/myapp/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# === FIXED AGENT_SECRET_KEY (Fernet, 44 url-safe base64 chars with ==) ===
+# Generate ONCE: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# NEVER regenerate - all user-stored API keys are encrypted with it.
+Environment=AGENT_SECRET_KEY=PASTE_YOUR_FERNET_KEY_HERE==
+
+# Behind nginx+https -> cookies should be Secure. Leave at default true.
+# (Do NOT set AGENT_COOKIE_SECURE=false; that is only for the dev start.bat.)
+Environment=AGENT_COOKIE_SECURE=true
+
+# Optional: allow the real domain in CORS (same-origin via nginx means CORS
+# usually isn't triggered, but set it for safety / direct backend access).
+# Environment=AGENT_CORS_ORIGINS=https://your.domain
+
+ExecStart=/opt/myapp/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8000 --no-access-log
+
+# Only listen on loopback -> nginx is the only client.
+Restart=always
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/myapp/data
+
+[Install]
+WantedBy=multi-user.target
