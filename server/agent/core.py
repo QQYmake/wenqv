@@ -30,6 +30,7 @@ class AgentConfig:
     max_tool_retries: int = 2
     tool_timeout_s: float = 60.0
     tool_result_max_chars: int = 65_536
+    default_skills: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.max_turns < 1:
@@ -40,6 +41,10 @@ class AgentConfig:
             raise ValueError("tool_timeout_s must be positive")
         if self.tool_result_max_chars < 64:
             raise ValueError("tool_result_max_chars must be at least 64")
+        if any(not name.strip() for name in self.default_skills):
+            raise ValueError("default_skills cannot contain blank names")
+        if len(set(self.default_skills)) != len(self.default_skills):
+            raise ValueError("default_skills cannot contain duplicates")
 
 
 @dataclass(slots=True)
@@ -62,7 +67,11 @@ class _CompletedModelTurn:
     reasoning_summary: str = ""
 
 
-def build_default_registry(skills: SkillManager) -> ToolRegistry:
+def build_default_registry(
+    skills: SkillManager,
+    *,
+    protected_skills: Sequence[str] = (),
+) -> ToolRegistry:
     """Create the built-ins used to exercise the complete agent loop."""
 
     return ToolRegistry(
@@ -70,7 +79,7 @@ def build_default_registry(skills: SkillManager) -> ToolRegistry:
             calculator_tool(),
             *file_tools(),
             load_skill_tool(skills),
-            remove_skill_tool(skills),
+            remove_skill_tool(skills, protected_names=protected_skills),
         ]
     )
 
@@ -101,8 +110,17 @@ class AgentCore:
         self.store = store
         self.clients = clients
         self.skills = skills
-        self.tools = tools if tools is not None else build_default_registry(skills)
         self.config = config
+        for name in config.default_skills:
+            skills.get(name)
+        self.tools = (
+            tools
+            if tools is not None
+            else build_default_registry(
+                skills,
+                protected_skills=config.default_skills,
+            )
+        )
         self.context = context_manager or ContextManager(clients, context_config)
         self.workspace_root = Path(workspace_root).resolve()
         self.workspace_resolver = workspace_resolver
@@ -203,13 +221,36 @@ class AgentCore:
         self._active[session_id] = active
         turns = 0
         try:
-            names = _ordered_unique(
-                [*selected_skills, *self.skills.extract_mentions(message)]
-            )
-            for name in names:
+            defaults = _ordered_unique(self.config.default_skills)
+            explicit = [
+                name
+                for name in _ordered_unique(
+                    [*selected_skills, *self.skills.extract_mentions(message)]
+                )
+                if name not in defaults
+            ]
+            requested = [
+                *((name, "default") for name in defaults),
+                *((name, "explicit") for name in explicit),
+            ]
+            for name, source in requested:
                 try:
                     results = await self.skills.inject_selected(
-                        self.store, session_id, [name]
+                        self.store,
+                        session_id,
+                        [name],
+                        runtime_context=(
+                            {
+                                "conversation_id": session_id,
+                                **(
+                                    {"workspace_data_root": "wenqu/sessions"}
+                                    if name == "wenqu"
+                                    else {}
+                                ),
+                            }
+                            if source == "default"
+                            else None
+                        ),
                     )
                 except SkillNotFoundError as exc:
                     yield _error("skill_not_found", str(exc), run_id, recoverable=True)
@@ -220,7 +261,7 @@ class AgentCore:
                     {
                         "name": result.name,
                         "status": "loaded" if result.loaded else "already_loaded",
-                        "source": "explicit",
+                        "source": source,
                         "request_id": run_id,
                     },
                 )

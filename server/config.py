@@ -45,6 +45,20 @@ def _env_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _string_tuple(value: Any, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    if value is None:
+        return default
+    items = value.split(",") if isinstance(value, str) else value
+    if not isinstance(items, (list, tuple)):
+        return default
+    result: list[str] = []
+    for item in items:
+        name = str(item).strip()
+        if name and name not in result:
+            result.append(name)
+    return tuple(result)
+
+
 def _resolve_path(root: Path, value: str | Path) -> Path:
     path = Path(value)
     return path.resolve() if path.is_absolute() else (root / path).resolve()
@@ -105,6 +119,7 @@ class AgentSettings:
     max_tool_retries: int = 2
     tool_timeout_s: float = 60.0
     tool_result_max_chars: int = 65_536
+    default_skills: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -312,6 +327,12 @@ def load_config(
                 ),
                 65_536,
                 minimum=256,
+            ),
+            default_skills=_string_tuple(
+                env.get(
+                    "AGENT_DEFAULT_SKILLS",
+                    agent_data.get("default_skills"),
+                )
             ),
         ),
         context=ContextSettings(
