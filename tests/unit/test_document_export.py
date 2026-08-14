@@ -15,6 +15,7 @@ from server.services.document_exporter import (
     sanitize_filename,
 )
 from server.services.exporters.markdown_ast import markdown_to_plain_text
+from server.services.exporters.pdf_exporter import _font_only_url_fetcher
 
 
 MARKDOWN_FIXTURE = """# 导出报告
@@ -154,3 +155,35 @@ def test_sanitize_filename_removes_unsafe_segments() -> None:
     assert "/" not in safe and "\\" not in safe
     assert ".." not in safe
     assert safe != "CON"
+
+
+def test_pdf_url_fetcher_only_allows_bundled_woff2_files(tmp_path: Path) -> None:
+    class FakeURLFetcher:
+        def __init__(self, **kwargs) -> None:
+            self.options = kwargs
+
+        def fetch(self, url: str, headers=None):
+            return {"url": url}
+
+    class FakeFatalURLFetchingError(RuntimeError):
+        pass
+
+    font_directory = tmp_path / "fonts"
+    font_directory.mkdir()
+    bundled_font = font_directory / "files" / "font.woff2"
+    bundled_font.parent.mkdir()
+    bundled_font.write_bytes(b"font")
+    outside_font = tmp_path / "outside.woff2"
+    outside_font.write_bytes(b"outside")
+
+    fetcher = _font_only_url_fetcher(
+        font_directory,
+        FakeURLFetcher,
+        FakeFatalURLFetchingError,
+    )
+
+    assert fetcher.fetch(bundled_font.as_uri())["url"] == bundled_font.as_uri()
+    with pytest.raises(FakeFatalURLFetchingError):
+        fetcher.fetch(outside_font.as_uri())
+    with pytest.raises(FakeFatalURLFetchingError):
+        fetcher.fetch("https://example.com/font.woff2")

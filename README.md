@@ -166,7 +166,7 @@ Open **Settings** and fill in `main` `base_url`, `api_key`, and `model`. Use **T
 | Agent / context limits | `AGENT_MAX_TURNS`, `AGENT_MAX_TOOL_RETRIES`, `AGENT_TOOL_TIMEOUT_S`, `AGENT_TOOL_RESULT_MAX_CHARS`, `AGENT_DEFAULT_SKILLS`, `AGENT_TOKEN_BUDGET`, `AGENT_SUMMARY_TRIGGER_RATIO`, `AGENT_PRESERVE_RECENT_MESSAGES` |
 | Storage and cache | `AGENT_SQLITE_PATH`, `REDIS_URL`, `AGENT_CACHE_TTL_S` |
 | Server and SPA | `AGENT_HOST`, `AGENT_PORT`, `AGENT_CORS_ORIGINS`, `AGENT_STATIC_DIR` |
-| Workspace | `AGENT_WORKSPACE_ID`, `AGENT_WORKSPACE_NAME`, `AGENT_WORKSPACE_ROOT` |
+| Workspace | `AGENT_WORKSPACE_ID`, `AGENT_WORKSPACE_NAME`, `AGENT_WORKSPACE_ROOT`, `AGENT_SKILLS_ROOT` |
 | Frontend API origin | `VITE_API_BASE_URL` |
 
 The checked-in `config.yaml` sets `llm.require_user_config: true`. In that mode, the server deliberately refuses to start without a valid `AGENT_SECRET_KEY`, so saved API keys are never silently made unrecoverable.

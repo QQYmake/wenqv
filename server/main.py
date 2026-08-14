@@ -222,7 +222,7 @@ def _compose_agent(
         workspace_resolver = workspace_resolver or IsolatedWorkspaceResolver(
             config.workspace.root
         )
-        skills_dir = config.workspace.root / "skills"
+        skills_dir = config.workspace.skills_root or (config.workspace.root / "skills")
         skill_manager = SkillManager(skills_dir)
         agent_config = _construct_supported(
             AgentConfig,

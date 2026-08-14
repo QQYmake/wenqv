@@ -43,3 +43,6 @@ storage:
 workspace:
   id: default
   root: .
+  # Keep trusted Skill text in the read-only application tree. Production
+  # overrides this with AGENT_SKILLS_ROOT when workspace state is external.
+  skills_root: skills
