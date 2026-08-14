@@ -153,6 +153,9 @@ class WorkspaceSettings:
     default_id: str = "default"
     default_name: str = "Default workspace"
     root: Path = Path(".")
+    # Trusted Skill instructions are read-only application assets and should
+    # not have to live inside the writable per-workspace state directory.
+    skills_root: Path | None = None
 
     @property
     def id(self) -> str:
@@ -392,6 +395,18 @@ def load_config(
                 env.get(
                     "AGENT_WORKSPACE_ROOT", _string(workspace_data.get("root"), ".")
                 ),
+            ),
+            skills_root=(
+                _resolve_path(
+                    root,
+                    env.get(
+                        "AGENT_SKILLS_ROOT",
+                        _string(workspace_data.get("skills_root"), "skills"),
+                    ),
+                )
+                if env.get("AGENT_SKILLS_ROOT", workspace_data.get("skills_root"))
+                is not None
+                else None
             ),
         ),
         config_path=selected_path if selected_path.exists() else None,

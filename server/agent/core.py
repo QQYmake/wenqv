@@ -16,8 +16,9 @@ from .context import ContextConfig, ContextManager, ContextPreparation
 from .models import AgentEvent, ChatMessage, LLMStreamChunk, ToolCall
 from .ports import ConversationStore, LLMClient, LLMClientProvider, WorkspaceResolver
 from .registry import ToolExecutionContext, ToolExecutionResult, ToolRegistry
+from ..services.document_exporter import DocumentExporter
 from .skills import SkillManager, SkillNotFoundError
-from .tools import calculator_tool, file_tools, load_skill_tool, remove_skill_tool
+from .tools import calculator_tool, export_file_tool, file_tools, load_skill_tool, remove_skill_tool
 
 
 class AgentRunCancelled(Exception):
@@ -71,6 +72,7 @@ def build_default_registry(
     skills: SkillManager,
     *,
     protected_skills: Sequence[str] = (),
+    document_exporter: DocumentExporter | None = None,
 ) -> ToolRegistry:
     """Create the built-ins used to exercise the complete agent loop."""
 
@@ -78,6 +80,7 @@ def build_default_registry(
         [
             calculator_tool(),
             *file_tools(),
+            export_file_tool(document_exporter),
             load_skill_tool(skills),
             remove_skill_tool(skills, protected_names=protected_skills),
         ]
@@ -101,6 +104,7 @@ class AgentCore:
         clients: LLMClientProvider,
         skills: SkillManager,
         tools: ToolRegistry | None = None,
+        document_exporter: DocumentExporter | None = None,
         config: AgentConfig = AgentConfig(),
         context_manager: ContextManager | None = None,
         context_config: ContextConfig = ContextConfig(),
@@ -119,6 +123,7 @@ class AgentCore:
             else build_default_registry(
                 skills,
                 protected_skills=config.default_skills,
+                document_exporter=document_exporter,
             )
         )
         self.context = context_manager or ContextManager(clients, context_config)

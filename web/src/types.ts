@@ -27,6 +27,12 @@ export interface ToolTrace {
   status: "running" | "success" | "error";
 }
 
+export interface ExportFileResult {
+  filename: string;
+  download_url: string;
+  mime_type: string;
+}
+
 export interface SkillNotice {
   name: string;
   alreadyLoaded?: boolean;

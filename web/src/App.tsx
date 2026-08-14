@@ -483,7 +483,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
             return {
               ...trace,
               name: String(event.name ?? trace.name),
-              result: event.result,
+              result: parseMaybeJson(event.result),
               error: Boolean(event.error),
               truncated: Boolean(event.truncated),
               patch: typeof event.patch === "string" ? event.patch : undefined,
@@ -495,7 +495,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
             traces.push({
               callId,
               name: String(event.name ?? "tool"),
-              result: event.result,
+              result: parseMaybeJson(event.result),
               error: Boolean(event.error),
               truncated: Boolean(event.truncated),
               patch: typeof event.patch === "string" ? event.patch : undefined,
@@ -666,10 +666,10 @@ export function App({ client = api, renderWater = true }: AppProps) {
             <Icon name="menu" />
           </button>
           <div className="header-title">
-            <span>{activeSession?.title ?? "湖心"}</span>
+            <span>{activeSession?.title ?? "问渠"}</span>
             {streaming && <small><i /> 正在工作</small>}
           </div>
-          <span className="header-watermark">BLUE LAKE</span>
+          <span className="header-watermark">问渠</span>
         </header>
 
         <div className="conversation-stage" id="conversation-stage" tabIndex={-1}>

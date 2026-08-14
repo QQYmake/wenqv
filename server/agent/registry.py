@@ -70,6 +70,10 @@ class ToolExecutionResult:
             event["patch_truncated"] = bool(
                 self.metadata.get("ui_patch_truncated", False)
             )
+        try:
+            event["result"] = json.loads(self.content)
+        except (TypeError, json.JSONDecodeError):
+            event["result"] = self.content
         return event
 
 

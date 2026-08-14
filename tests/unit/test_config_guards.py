@@ -50,6 +50,27 @@ def test_load_config_supports_default_skills_from_yaml_and_environment(
     assert from_env.agent.default_skills == ("alpha", "beta")
 
 
+def test_load_config_separates_writable_workspace_from_trusted_skills(
+    tmp_path: Path,
+) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "workspace:\n  root: state\n  skills_root: skills\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        config_file,
+        environ={
+            "AGENT_WORKSPACE_ROOT": str(tmp_path / "var" / "workspaces"),
+            "AGENT_SKILLS_ROOT": str(tmp_path / "app" / "skills"),
+        },
+    )
+
+    assert config.workspace.root == (tmp_path / "var" / "workspaces").resolve()
+    assert config.workspace.skills_root == (tmp_path / "app" / "skills").resolve()
+
+
 def test_build_cipher_fails_fast_when_required_and_no_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
