@@ -23,7 +23,7 @@ class RecordingClient(LLMClient):
         self.completions += 1
         return type("R", (), {"content": "pong"})()
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         yield  # pragma: no cover
 
 

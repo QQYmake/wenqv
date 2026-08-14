@@ -18,7 +18,7 @@ class SummaryClient:
             raise RuntimeError("summary unavailable")
         return LLMResponse(self.response)
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         if False:
             yield
 
@@ -104,4 +104,3 @@ def test_title_uses_summary_model_and_falls_back_on_failure() -> None:
         asyncio.run(fallback_manager.generate_title(messages, max_chars=20))
         == "Analyze the lake wor"
     )
-

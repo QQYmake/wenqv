@@ -147,7 +147,7 @@ class RecordingClient:
         self.scripts = list(scripts)
         self.calls: list[list] = []
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         self.calls.append(list(messages))
         script = self.scripts.pop(0)
 

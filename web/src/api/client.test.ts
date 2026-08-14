@@ -38,7 +38,7 @@ describe("api client cookie identity", () => {
 
     const events: Array<{ type: string }> = [];
     for await (const event of api.streamChat(
-      { session_id: "s1", message: "hi" },
+      { session_id: "s1", message: "hi", reasoning_effort: "high" },
       new AbortController().signal,
     )) {
       events.push(event);
@@ -48,6 +48,11 @@ describe("api client cookie identity", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/api/chat");
     expect(init.credentials).toBe("include");
+    expect(JSON.parse(String(init.body))).toEqual({
+      session_id: "s1",
+      message: "hi",
+      reasoning_effort: "high",
+    });
   });
 });
 

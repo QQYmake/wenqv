@@ -43,7 +43,7 @@ class FakeClient:
     async def complete(self, messages, *, tools=None, max_tokens=None):
         return LLMResponse(content="pong")
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         yield  # pragma: no cover
 
 

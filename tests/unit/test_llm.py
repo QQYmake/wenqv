@@ -4,7 +4,12 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 
-from server.agent.llm import LLMClientFactory, LLMConfig, OpenAICompatClient
+from server.agent.llm import (
+    LLMClientFactory,
+    LLMConfig,
+    OpenAICompatClient,
+    _reasoning_text,
+)
 from server.agent.models import ChatMessage, LLMResponse, LLMStreamChunk
 
 
@@ -12,7 +17,7 @@ class FakeClient:
     async def complete(self, messages, *, tools=None, max_tokens=None):
         return LLMResponse("ok")
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         yield LLMStreamChunk(content_delta="ok")
 
 
@@ -62,6 +67,44 @@ def test_mapping_build_is_lazy_cached_and_timeout_is_not_extra_body() -> None:
 def test_llm_config_rejects_nonpositive_timeout() -> None:
     with pytest.raises(ValueError, match="timeout"):
         LLMConfig("https://example.test/v1", "key", "model", timeout_s=0)
+
+
+def test_reasoning_effort_is_a_top_level_chat_parameter() -> None:
+    client = OpenAICompatClient(
+        LLMConfig(
+            "https://example.test/v1",
+            "key",
+            "model",
+            extra_body={"provider_flag": True},
+        )
+    )
+
+    request = client._request(
+        [ChatMessage(role="user", content="hi")],
+        reasoning_effort="max",
+    )
+
+    assert request["reasoning_effort"] == "max"
+    assert request["extra_body"] == {"provider_flag": True}
+    assert "reasoning_effort" not in request["extra_body"]
+
+
+@pytest.mark.parametrize("field", ["reasoning_content", "reasoning", "thinking"])
+def test_plaintext_gateway_reasoning_fields_are_extracted(field: str) -> None:
+    delta = type("Delta", (), {field: "可展示摘要"})()
+    assert _reasoning_text(delta) == "可展示摘要"
+
+
+def test_structured_or_opaque_reasoning_is_ignored() -> None:
+    delta = type(
+        "Delta",
+        (),
+        {
+            "reasoning_content": {"encrypted": "opaque"},
+            "model_extra": {"thinking": ["not", "plaintext"]},
+        },
+    )()
+    assert _reasoning_text(delta) == ""
 
 
 def test_factory_accepts_an_application_config_object() -> None:

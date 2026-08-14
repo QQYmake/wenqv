@@ -27,8 +27,10 @@ class FakeAgent:
 
     def __init__(self):
         self.abort_calls: list[tuple[str, str | None]] = []
+        self.stream_calls: list[dict] = []
 
     async def stream(self, **kwargs):
+        self.stream_calls.append(kwargs)
         yield {"type": "tool_call", "call_id": "c1", "name": "calculator", "arguments": {"expression": "2+2"}}
         yield {"type": "tool_result", "call_id": "c1", "name": "calculator", "result": "4", "error": False}
         yield {"type": "text_delta", "delta": "The answer "}
@@ -58,7 +60,7 @@ class TwoToolClient:
     def __init__(self):
         self.turn = 0
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         self.turn += 1
         if self.turn <= 2:
             expression = "2+2" if self.turn == 1 else "4*3"
@@ -132,9 +134,10 @@ def test_session_crud_and_workspace_isolation():
 
 def test_chat_sse_has_named_events_and_persists_history():
     title_generator = FakeTitleGenerator()
+    agent = FakeAgent()
     app = create_app(
         make_config(),
-        agent=FakeAgent(),
+        agent=agent,
         skill_manager=FakeSkills(),
         title_generator=title_generator,
     )
@@ -166,8 +169,40 @@ def test_chat_sse_has_named_events_and_persists_history():
             "message",
         ]
         assert messages[-1]["content"] == "The answer is 4."
+        assert messages[-1]["metadata"]["reasoning_effort"] == "medium"
+        assert agent.stream_calls[0]["reasoning_effort"] == "medium"
         assert client.get("/api/sessions").json()["sessions"][0]["title"] == "Simple Calculation"
         assert title_generator.calls == 1
+
+
+def test_chat_reasoning_effort_is_validated_and_forwarded():
+    agent = FakeAgent()
+    app = create_app(make_config(), agent=agent)
+    with TestClient(app, headers={"X-Workspace-ID": "default"}) as client:
+        session = client.post("/api/sessions", json={}).json()
+        invalid = client.post(
+            "/api/chat",
+            json={
+                "session_id": session["id"],
+                "message": "hi",
+                "reasoning_effort": "extreme",
+            },
+        )
+        assert invalid.status_code == 422
+
+        with client.stream(
+            "POST",
+            "/api/chat",
+            json={
+                "session_id": session["id"],
+                "message": "think",
+                "reasoning_effort": "high",
+            },
+        ) as response:
+            assert response.status_code == 200
+            event_payloads(response)
+
+        assert agent.stream_calls[-1]["reasoning_effort"] == "high"
 
 
 def test_skills_config_and_abort_are_safe():

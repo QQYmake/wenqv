@@ -1,5 +1,5 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { Skill } from "../types";
+import type { ReasoningEffort, Skill } from "../types";
 import { Icon } from "./Icon";
 
 interface ComposerProps {
@@ -10,11 +10,13 @@ interface ComposerProps {
   streaming: boolean;
   abortEnabled?: boolean;
   apiConfigured?: boolean;
+  reasoningEffort: ReasoningEffort;
   onChange: (value: string) => void;
   onSubmit: (value: string) => void;
   onAbort: () => void;
   onToggleSkill: (name: string, selected: boolean) => void;
   onOpenSettings?: () => void;
+  onReasoningEffortChange: (effort: ReasoningEffort) => void;
 }
 
 function currentMention(value: string) {
@@ -29,11 +31,13 @@ export function Composer({
   streaming,
   abortEnabled = true,
   apiConfigured = true,
+  reasoningEffort,
   onChange,
   onSubmit,
   onAbort,
   onToggleSkill,
   onOpenSettings,
+  onReasoningEffortChange,
 }: ComposerProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -177,6 +181,22 @@ export function Composer({
 
         <div className="composer-footer">
           <div className="composer-meta">
+            <label className="reasoning-effort-control" title="本轮 API 思考强度">
+              <span>思考</span>
+              <select
+                aria-label="思考强度"
+                value={reasoningEffort}
+                disabled={streaming}
+                onChange={(event) =>
+                  onReasoningEffortChange(event.target.value as ReasoningEffort)
+                }
+              >
+                <option value="low">低</option>
+                <option value="medium">中</option>
+                <option value="high">高</option>
+                <option value="max">Max</option>
+              </select>
+            </label>
             <span className="model-tag" title={`当前模型：${modelId}`}>
               {modelId || "读取模型…"}
             </span>

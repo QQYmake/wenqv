@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, SkillNotice } from "../types";
 import { ExecutionTrace } from "./ExecutionTrace";
 import { Icon } from "./Icon";
@@ -55,6 +55,41 @@ function AssistantMark({ pending }: { pending?: boolean }) {
   );
 }
 
+function ReasoningDetails({ summary, pending }: { summary?: string; pending?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const hasSummary = Boolean(summary?.trim());
+
+  if (!hasSummary) {
+    return (
+      <div
+        className={`reasoning-details reasoning-details--static${pending ? " reasoning-details--pending" : ""}`}
+        role="status"
+      >
+        <span className="reasoning-state" aria-hidden="true" />
+        <span>思考中</span>
+      </div>
+    );
+  }
+
+  return (
+    <details
+      className={`reasoning-details${pending ? " reasoning-details--pending" : ""}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <span className="reasoning-state" aria-hidden="true" />
+        <span>思考中</span>
+        <small>{open ? "收起摘要" : "查看摘要"}</small>
+        <Icon className="reasoning-chevron" name="chevron" />
+      </summary>
+      <div className="reasoning-summary">
+        <Markdown>{summary ?? ""}</Markdown>
+      </div>
+    </details>
+  );
+}
+
 export function MessageList({ messages }: { messages: ChatMessage[] }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const shouldFollowRef = useRef(true);
@@ -98,22 +133,17 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
             <article className="message message--assistant" key={message.id}>
               <AssistantMark pending={message.pending && !message.content} />
               <div className="assistant-content">
+                {(message.pending || message.reasoningEffort || message.reasoningSummary) && (
+                  <ReasoningDetails
+                    summary={message.reasoningSummary}
+                    pending={message.pending}
+                  />
+                )}
                 {(message.skills ?? []).map((notice) => (
                   <SkillStrip key={`${message.id}-${notice.name}`} notice={notice} />
                 ))}
                 {(message.traces?.length ?? 0) > 0 && <ExecutionTrace traces={message.traces ?? []} />}
-                {message.content ? (
-                  <Markdown>{message.content}</Markdown>
-                ) : (
-                  message.pending && (
-                    <div className="thinking-line" role="status">
-                      <span />
-                      <span />
-                      <span />
-                      <span className="sr-only">正在思考</span>
-                    </div>
-                  )
-                )}
+                {message.content && <Markdown>{message.content}</Markdown>}
                 {message.error && <div className="message-error">{message.error}</div>}
               </div>
             </article>
