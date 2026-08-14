@@ -146,6 +146,34 @@ describe("App", () => {
     });
   });
 
+  it("renders a direct download action for a successful export_file result", async () => {
+    const user = userEvent.setup();
+    const client = makeClient({
+      events: [
+        { type: "tool_call", call_id: "export-1", name: "export_file", arguments: {} },
+        {
+          type: "tool_result",
+          call_id: "export-1",
+          name: "export_file",
+          result: {
+            filename: "report.pdf",
+            download_url: "/api/files/0123456789abcdef0123456789abcdef",
+            mime_type: "application/pdf",
+          },
+        },
+        { type: "done" },
+      ],
+    });
+    render(<App client={client} renderWater={false} />);
+
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "导出报告");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    const link = await screen.findByRole("link", { name: "下载 report.pdf" });
+    expect(link).toHaveAttribute("href", "/api/files/0123456789abcdef0123456789abcdef");
+    expect(link).toHaveAttribute("download", "report.pdf");
+  });
+
   it("remembers the per-turn reasoning effort and keeps the marker without a summary", async () => {
     const user = userEvent.setup();
     const client = makeClient();

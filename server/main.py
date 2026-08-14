@@ -26,6 +26,7 @@ from server.storage import (
     build_side_cache,
 )
 from server.storage.encryption import EncryptionError
+from server.services.document_exporter import DocumentExporter
 
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,8 @@ def create_app(
     client_resolver: Any | None = None,
     user_config_repo: Any | None = None,
     cipher: Any | None = None,
+    document_exporter: DocumentExporter | None = None,
+    workspace_resolver: Any | None = None,
 ) -> FastAPI:
     """Create an app with injectable adapters for integration tests."""
 
@@ -75,6 +78,8 @@ def create_app(
         )
         store = SQLiteStore(config.storage.sqlite_path, cache=cache)
     agent_store = AgentStoreAdapter(store)
+    document_exporter = document_exporter or DocumentExporter()
+    workspace_resolver = workspace_resolver or IsolatedWorkspaceResolver(config.workspace.root)
 
     # Per-user LLM configuration: Fernet cipher for the api_key, a repository
     # for encrypted read/write, and a ClientResolver adapter that merges user
@@ -88,7 +93,12 @@ def create_app(
 
     if agent is None:
         agent, default_skills, default_title_generator = _compose_agent(
-            config, agent_store, store, client_resolver
+            config,
+            agent_store,
+            store,
+            client_resolver,
+            document_exporter,
+            workspace_resolver,
         )
         skill_manager = skill_manager or default_skills
         title_generator = title_generator or default_title_generator
@@ -102,6 +112,8 @@ def create_app(
         title_generator=title_generator,
         client_resolver=client_resolver,
         user_config_repo=user_config_repo,
+        document_exporter=document_exporter,
+        workspace_resolver=workspace_resolver,
     )
 
     @asynccontextmanager
@@ -187,6 +199,8 @@ def _compose_agent(
     agent_store: AgentStoreAdapter,
     store: SQLiteStore,
     client_resolver: Any,
+    document_exporter: DocumentExporter | None = None,
+    workspace_resolver: Any | None = None,
 ) -> tuple[Any, Any | None, Any | None]:
     """Lazily compose the framework-free core, keeping imports at the edge."""
 
@@ -199,11 +213,15 @@ def _compose_agent(
         from server.agent.skills import SkillManager
         from server.agent.tools import (
             calculator_tool,
+            export_file_tool,
             file_tools,
             load_skill_tool,
             remove_skill_tool,
         )
 
+        workspace_resolver = workspace_resolver or IsolatedWorkspaceResolver(
+            config.workspace.root
+        )
         skills_dir = config.workspace.root / "skills"
         skill_manager = SkillManager(skills_dir)
         agent_config = _construct_supported(
@@ -235,6 +253,7 @@ def _compose_agent(
             [
                 calculator_tool(),
                 *file_tools(),
+                export_file_tool(document_exporter),
                 load_skill_tool(skill_manager),
                 remove_skill_tool(
                     skill_manager,
@@ -259,9 +278,8 @@ def _compose_agent(
                 "context_manager": context_manager,
                 "config": agent_config,
                 "workspace_root": config.workspace.root,
-                "workspace_resolver": IsolatedWorkspaceResolver(
-                    config.workspace.root
-                ),
+                "workspace_resolver": workspace_resolver,
+                "document_exporter": document_exporter,
             },
         )
         return core, skill_manager, context_manager

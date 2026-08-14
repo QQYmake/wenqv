@@ -14,6 +14,7 @@ It is designed for a trusted private environment: each browser receives a stable
 - **Workspace-scoped state.** A `workspace_id` HttpOnly cookie keeps a browser's sessions and saved model configuration stable across reloads.
 - **Encrypted provider settings.** The Settings panel saves `main` and optional `summary` provider details with Fernet encryption; API keys are only returned to the browser in masked form.
 - **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. Alongside `calculator`, `load_skill`, and `remove_skill`, every run receives workspace-confined `read`, `write`, `edit`, `grep`, `find`, and `ls` file tools.
+- **Markdown document export.** The `export_file` Tool converts Markdown into `md`, `txt`, `docx`, or `pdf`, stores the result under the active workspace, and returns only an opaque `/api/files/{file_id}` download URL. DOCX uses `python-docx`; PDF uses a Markdown-to-HTML template with the bundled LXGW WenKai Lite font CSS and requires WeasyPrint's native text-rendering libraries at runtime.
 - **Default Wenqu workflow.** The packaged `wenqu` Skill is injected once into every conversation and routes its seven coaching stages. Training files live under the browser workspace, so another conversation in the same browser can explicitly resume them.
 - **Bounded execution.** Agent turns, consecutive tool failures, tool timeouts, tool-output size, and context size are configurable limits.
 - **Responsive chat UI.** The frontend shows a compact, collapsed `Thinking` row instead of exposing reasoning inline; compatible plaintext summaries can be expanded, while tool traces remain separate.
@@ -87,6 +88,7 @@ The checked-in default is `wenqu`, adapted as one root package plus seven stage 
 | `grep` | Searches non-ignored text files with regex/literal, glob, case, context, and result-limit controls. |
 | `find` | Finds non-ignored files by glob and returns paths relative to the search directory. |
 | `ls` | Lists one directory alphabetically, including dotfiles, with `/` suffixes for directories. |
+| `export_file` | Converts Markdown to `md`, `txt`, `docx`, or `pdf`, enforces input/output limits, and returns a filename, MIME type, and opaque download URL. |
 
 `grep` and `find` follow Git-compatible `.gitignore` rules and never enter `.git`. Search/list output is capped at 50KB. If an OpenAI-compatible endpoint explicitly rejects image input, the client retries once without image data, tells the model that vision is unavailable, and remembers that limitation for that model client.
 
@@ -96,6 +98,7 @@ The checked-in default is `wenqu`, adapted as one root package plus seven stage 
 server/
   api/                 FastAPI routes, request schemas, middleware, service adapters
   agent/               ReAct core, ports, context manager, Skills, tools, LLM adapter
+  services/            Markdown parsing and md/txt/docx/pdf export implementations
   storage/             SQLite, cache, encrypted configuration, workspace resolver
   main.py              Lazy composition root and optional SPA hosting
 web/
@@ -115,6 +118,8 @@ docs/architecture.mmd  Canonical Mermaid architecture diagram
 - A current Node.js version compatible with Vite 8
 - An OpenAI Chat Completions-compatible endpoint that supports streamed tool calls
 - Redis only if you want the optional shared side cache
+
+`requirements.txt` includes the Markdown, DOCX, and WeasyPrint conversion libraries. PDF export also needs the native text-rendering libraries required by WeasyPrint on the deployment OS; the Python package alone is not sufficient on every platform.
 
 ### 1. Install dependencies
 
@@ -179,6 +184,7 @@ The checked-in `config.yaml` sets `llm.require_user_config: true`. In that mode,
 | `POST /api/user/config/test` | Probe submitted provider roles without saving them |
 | `POST /api/chat` | Start SSE chat; body includes `reasoning_effort` (`low` / `medium` / `high` / `max`, default `medium`) |
 | `POST /api/chat/abort` | Request cooperative cancellation of an active run |
+| `GET /api/files/{file_id}` | Download a workspace-scoped exported file with its stored MIME type and filename |
 | `GET /api/health` | Health check |
 
 When `web/dist` exists, FastAPI can serve the built SPA and fall back to `index.html` for client routes. Missing `/api/*` routes remain JSON 404 responses rather than becoming the SPA HTML shell.

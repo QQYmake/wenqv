@@ -23,6 +23,8 @@ sudo apt install -y python3-venv python3-pip nodejs npm nginx
 # curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt install -y nodejs
 ```
 
+PDF export uses WeasyPrint. Before enabling PDF downloads in production, install the native text-rendering libraries required by the WeasyPrint version in `requirements.txt` and verify the deployment with a Chinese PDF export; installing the Python package alone may not provide those libraries.
+
 ## 2. 装后端 Python 依赖
 ```bash
 cd /opt/myapp

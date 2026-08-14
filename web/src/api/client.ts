@@ -12,6 +12,11 @@ import { parseSSEStream } from "./sse";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
+export function resolveApiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${API_BASE}${path}`;
+}
+
 class ApiError extends Error {
   constructor(
     message: string,
@@ -23,7 +28,7 @@ class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(resolveApiUrl(path), {
     ...init,
     // The workspace identity is a cookie set by /api/bootstrap; every request
     // must carry it, also when VITE_API_BASE_URL points at another origin.
@@ -153,7 +158,7 @@ export const api = {
     },
     signal: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
-    const response = await fetch(`${API_BASE}/api/chat`, {
+    const response = await fetch(resolveApiUrl("/api/chat"), {
       method: "POST",
       // Same cookie-identity requirement as request(): the SSE chat stream is
       // a private API path and needs the workspace cookie on every origin.

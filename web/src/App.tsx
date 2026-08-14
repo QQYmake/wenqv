@@ -483,7 +483,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
             return {
               ...trace,
               name: String(event.name ?? trace.name),
-              result: event.result,
+              result: parseMaybeJson(event.result),
               error: Boolean(event.error),
               truncated: Boolean(event.truncated),
               patch: typeof event.patch === "string" ? event.patch : undefined,
@@ -495,7 +495,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
             traces.push({
               callId,
               name: String(event.name ?? "tool"),
-              result: event.result,
+              result: parseMaybeJson(event.result),
               error: Boolean(event.error),
               truncated: Boolean(event.truncated),
               patch: typeof event.patch === "string" ? event.patch : undefined,

@@ -9,7 +9,11 @@ from typing import Any
 import asyncio
 import uuid
 
+from pathlib import Path
+from collections.abc import Callable
+
 from server.config import AppConfig
+from server.services.document_exporter import DocumentExporter
 from server.storage import AgentStoreAdapter, SQLiteStore
 
 
@@ -237,6 +241,8 @@ class APIServices:
     runs: RunCoordinator = field(default_factory=RunCoordinator)
     client_resolver: Any | None = None
     user_config_repo: Any | None = None
+    document_exporter: DocumentExporter | None = None
+    workspace_resolver: Callable[[str | None], Path] | None = None
 
 
 __all__ = [
