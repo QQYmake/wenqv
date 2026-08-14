@@ -14,6 +14,7 @@ from server.config import (
     StorageSettings,
     WorkspaceSettings,
 )
+from server.config import load_config
 from server.main import create_app
 
 
@@ -38,6 +39,26 @@ def _config(tmp_path: Path) -> AppConfig:
         ),
         workspace=WorkspaceSettings(default_id="default", root=tmp_path / "ws"),
     )
+
+
+def test_packaged_default_skills_survive_external_workspace_root(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    config = load_config(
+        project_root / "config.yaml",
+        environ={
+            "AGENT_REQUIRE_USER_CONFIG": "false",
+            "AGENT_WORKSPACE_ROOT": str(tmp_path / "runtime-workspace"),
+        },
+    )
+    config.storage.sqlite_path = Path(":memory:")
+    config.server.static_dir = tmp_path / "missing-dist"
+
+    app = create_app(config)
+    with TestClient(app, headers={"X-Workspace-ID": "external-root-test"}) as client:
+        response = client.get("/api/skills")
+
+    assert response.status_code == 200
+    assert "wenqu" in {item["name"] for item in response.json()["skills"]}
 
 
 def test_app_starts_with_empty_llm_and_require_user_config(

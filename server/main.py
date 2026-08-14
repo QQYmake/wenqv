@@ -204,7 +204,7 @@ def _compose_agent(
             remove_skill_tool,
         )
 
-        skills_dir = config.workspace.root / "skills"
+        skills_dir = _resolve_skills_directory(config)
         skill_manager = SkillManager(skills_dir)
         agent_config = _construct_supported(
             AgentConfig,
@@ -268,6 +268,27 @@ def _compose_agent(
     except Exception as exc:
         logger.exception("Agent Core composition failed")
         return UnavailableAgent(str(exc)), skill_manager, context_manager
+
+
+def _resolve_skills_directory(config: AppConfig) -> Path:
+    """Find packaged Skills independently from per-workspace runtime data.
+
+    ``AGENT_WORKSPACE_ROOT`` may point at an external writable data directory;
+    packaged Skill markdown remains next to the application's config (or in
+    the workspace root for injected test configurations). Keeping these roots
+    separate prevents a valid production workspace override from disabling the
+    configured default Skills.
+    """
+
+    candidates: list[Path] = []
+    if config.config_path is not None:
+        candidates.append(config.config_path.parent / "skills")
+    candidates.append(config.workspace.root / "skills")
+    candidates.append(Path(__file__).resolve().parents[1] / "skills")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
 
 
 def _construct_supported(factory: Any, candidates: dict[str, Any]) -> Any:
