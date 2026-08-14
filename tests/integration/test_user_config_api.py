@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,7 @@ from server.config import (
     WorkspaceSettings,
 )
 from server.main import create_app
+from server.api import user_config as user_config_api
 
 
 class FakeAgent:
@@ -633,3 +635,188 @@ def test_no_plaintext_at_rest_or_in_logs(tmp_path: Path, caplog) -> None:
         assert plaintext.encode() not in data, f"plaintext key found in {path.name}"
     # Logs emitted during the flows must not contain the key either.
     assert plaintext not in caplog.text
+
+
+def _model_discovery_sdk(monkeypatch, *, data=None, error=None):
+    captured = []
+
+    class FakeModelsClient:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+            self.models = self
+
+        async def list(self):
+            if error is not None:
+                raise error
+            return SimpleNamespace(data=data or [])
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(user_config_api, "AsyncOpenAI", FakeModelsClient)
+    return captured
+
+
+def _models_app(tmp_path: Path, *, default_llm: LLMSettings | None = None):
+    store = _make_store()
+    resolved_llm = default_llm or LLMSettings()
+    resolver, repo = _resolver(store, resolved_llm)
+    return create_app(
+        _config(tmp_path, default_llm=resolved_llm),
+        store=store,
+        client_resolver=resolver,
+        user_config_repo=repo,
+        agent=FakeAgent(),
+    ), store, repo
+
+
+def test_list_models_uses_submitted_main_provider_without_model(tmp_path: Path, monkeypatch) -> None:
+    captured = _model_discovery_sdk(
+        monkeypatch,
+        data=[SimpleNamespace(id="model-a"), SimpleNamespace(id="model-b")],
+    )
+    app, _, _ = _models_app(tmp_path)
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-main"}) as client:
+        response = client.post(
+            "/api/user/config/models",
+            json={
+                "role": "main",
+                "base_url": "https://submitted.example.com/v1",
+                "api_key": "sk-submitted-model-key",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"models": ["model-a", "model-b"]}
+    assert captured == [{
+        "base_url": "https://submitted.example.com/v1",
+        "api_key": "sk-submitted-model-key",
+        "timeout": 120.0,
+    }]
+    assert "sk-submitted-model-key" not in response.text
+
+
+def test_list_models_empty_key_reuses_saved_key(tmp_path: Path, monkeypatch) -> None:
+    captured = _model_discovery_sdk(monkeypatch, data=[SimpleNamespace(id="saved-model")])
+    app, _, _ = _models_app(tmp_path)
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-stored"}) as client:
+        saved = client.put("/api/user/config", json=_client_config())
+        assert saved.status_code == 200
+        response = client.post(
+            "/api/user/config/models",
+            json={"role": "main", "base_url": "", "api_key": ""},
+        )
+
+    assert response.status_code == 200
+    assert captured[0]["base_url"] == "https://api.example.com/v1"
+    assert captured[0]["api_key"] == "sk-user-secret-12345"
+    assert "sk-user-secret-12345" not in response.text
+
+
+def test_list_models_summary_uses_resolved_main_fallback(tmp_path: Path, monkeypatch) -> None:
+    captured = _model_discovery_sdk(monkeypatch, data=[SimpleNamespace(id="summary-from-main")])
+    app, _, _ = _models_app(tmp_path)
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-summary"}) as client:
+        client.put("/api/user/config", json=_client_config())
+        response = client.post(
+            "/api/user/config/models",
+            json={"role": "summary", "base_url": "", "api_key": ""},
+        )
+
+    assert response.status_code == 200
+    assert captured[0]["base_url"] == "https://api.example.com/v1"
+    assert captured[0]["api_key"] == "sk-user-secret-12345"
+
+
+def test_list_models_preserves_provider_order_and_deduplicates_empty_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _model_discovery_sdk(
+        monkeypatch,
+        data=[
+            {"id": "first"},
+            {"id": ""},
+            {"id": " first "},
+            {"name": "missing-id"},
+            SimpleNamespace(id="second"),
+            SimpleNamespace(id=None),
+        ],
+    )
+    app, _, _ = _models_app(tmp_path)
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-normalize"}) as client:
+        response = client.post(
+            "/api/user/config/models",
+            json={"role": "main", "base_url": "https://provider.example/v1", "api_key": "sk-key"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"models": ["first", "second"]}
+
+
+def test_list_models_returns_empty_list_for_provider_with_no_models(tmp_path: Path, monkeypatch) -> None:
+    _model_discovery_sdk(monkeypatch, data=[])
+    app, _, _ = _models_app(tmp_path)
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-empty"}) as client:
+        response = client.post(
+            "/api/user/config/models",
+            json={"role": "main", "base_url": "https://provider.example/v1", "api_key": "sk-key"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"models": []}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"role": "main", "base_url": "", "api_key": "sk-key"},
+        {"role": "main", "base_url": "https://provider.example/v1", "api_key": ""},
+        {"role": "other", "base_url": "https://provider.example/v1", "api_key": "sk-key"},
+    ],
+)
+def test_list_models_rejects_incomplete_or_invalid_request(tmp_path: Path, body) -> None:
+    empty_llm = LLMSettings(main=LLMProviderConfig(base_url="", api_key="", model=""))
+    app, _, _ = _models_app(tmp_path, default_llm=empty_llm)
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-invalid"}) as client:
+        response = client.post("/api/user/config/models", json=body)
+
+    assert response.status_code == 422
+
+
+def test_list_models_maps_provider_error_without_leaking_key(tmp_path: Path, monkeypatch) -> None:
+    secret = "sk-provider-error-secret"
+    _model_discovery_sdk(monkeypatch, error=RuntimeError(secret))
+    app, _, _ = _models_app(tmp_path)
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-error"}) as client:
+        response = client.post(
+            "/api/user/config/models",
+            json={"role": "main", "base_url": "https://provider.example/v1", "api_key": secret},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "无法从 Provider 获取模型列表"
+    assert secret not in response.text
+
+
+def test_list_models_maps_timeout_to_504(tmp_path: Path, monkeypatch) -> None:
+    _model_discovery_sdk(monkeypatch, error=TimeoutError("provider timed out"))
+    app, _, _ = _models_app(tmp_path)
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-timeout"}) as client:
+        response = client.post(
+            "/api/user/config/models",
+            json={"role": "main", "base_url": "https://provider.example/v1", "api_key": "sk-key"},
+        )
+
+    assert response.status_code == 504
+
+
+def test_list_models_returns_503_when_config_storage_is_unavailable(tmp_path: Path) -> None:
+    app = create_app(_config(tmp_path), user_config_repo=None, agent=FakeAgent())
+    app.state.services.user_config_repo = None
+    with TestClient(app, headers={"X-Workspace-ID": "ws-models-storage"}) as client:
+        response = client.post(
+            "/api/user/config/models",
+            json={"role": "main", "base_url": "https://provider.example/v1", "api_key": "sk-key"},
+        )
+
+    assert response.status_code == 503

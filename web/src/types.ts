@@ -1,5 +1,6 @@
 export type Theme = "light" | "dark";
 export type ReasoningEffort = "low" | "medium" | "high" | "max";
+export type ModelRole = "main" | "summary";
 
 export interface Session {
   id: string;
@@ -87,6 +88,16 @@ export interface UserLLMConfig {
 export interface UserLLMConfigInput {
   main: ProviderConfigView;
   summary: ProviderConfigView;
+}
+
+export interface ModelDiscoveryRequest {
+  role: ModelRole;
+  base_url: string;
+  api_key: string;
+}
+
+export interface ModelDiscoveryResponse {
+  models: string[];
 }
 
 export type AgentEvent =

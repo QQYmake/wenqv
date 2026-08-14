@@ -1,6 +1,8 @@
 import type {
   AgentEvent,
   ChatMessage,
+  ModelDiscoveryRequest,
+  ModelDiscoveryResponse,
   PublicConfig,
   ReasoningEffort,
   Session,
@@ -137,6 +139,13 @@ export const api = {
 
   testUserConfig(body: UserLLMConfigInput): Promise<{ ok: boolean; detail: string }> {
     return request("/api/user/config/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  listModels(body: ModelDiscoveryRequest): Promise<ModelDiscoveryResponse> {
+    return request("/api/user/config/models", {
       method: "POST",
       body: JSON.stringify(body),
     });

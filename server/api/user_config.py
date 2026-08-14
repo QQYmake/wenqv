@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+from collections.abc import Mapping
 from typing import Any
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+try:
+    from openai import AsyncOpenAI
+except ImportError:  # pragma: no cover - the dependency is required in production
+    AsyncOpenAI = None  # type: ignore[assignment,misc]
 
 from .dependencies import get_services, get_workspace_id
 from .services import APIServices
@@ -23,6 +32,12 @@ class ProviderConfigBody(BaseModel):
 class UserConfigBody(BaseModel):
     main: ProviderConfigBody = Field(default_factory=ProviderConfigBody)
     summary: ProviderConfigBody = Field(default_factory=ProviderConfigBody)
+
+
+class ModelDiscoveryBody(BaseModel):
+    role: Literal["main", "summary"]
+    base_url: str = ""
+    api_key: str = ""
 
 
 @router.get("")
@@ -114,8 +129,128 @@ async def test_user_config(
     return {"ok": ok, "detail": detail, "roles": probes}
 
 
+@router.post("/models")
+async def list_models(
+    body: ModelDiscoveryBody,
+    workspace_id: str = Depends(get_workspace_id),
+    services: APIServices = Depends(get_services),
+) -> dict[str, list[str]]:
+    """Discover model IDs from the provider configured for one role.
+
+    Discovery deliberately does not require a model value. The resolved
+    workspace config supplies the saved/default provider fields, while the
+    current request may override the URL and key without persisting anything.
+    """
+
+    repo = services.user_config_repo
+    if repo is None:
+        raise HTTPException(status_code=503, detail="用户配置存储不可用")
+
+    try:
+        resolved = await repo.get_resolved(workspace_id, services.config.llm)
+        base_url, api_key = _resolved_provider(resolved, body.role)
+    except Exception:
+        # Do not expose repository/encryption errors or their arguments.
+        raise HTTPException(status_code=503, detail="用户配置存储不可用") from None
+
+    base_url = body.base_url.strip() or base_url
+    api_key = body.api_key or api_key
+    if len(base_url) > 512 or len(api_key) > 512:
+        raise HTTPException(status_code=422, detail="模型发现配置无效")
+    if not base_url or not api_key:
+        raise HTTPException(status_code=422, detail="无法解析完整的 base_url 和 api_key")
+
+    try:
+        models = await _discover_models(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=_model_discovery_timeout(services.config, body.role),
+        )
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            raise HTTPException(status_code=504, detail="模型列表请求超时") from None
+        raise HTTPException(status_code=502, detail="无法从 Provider 获取模型列表") from None
+    return {"models": models}
+
+
 def _complete(role: dict[str, str]) -> bool:
     return bool(role["base_url"] and role["api_key"] and role["model"])
+
+
+def _resolved_provider(resolved: Any, role: Literal["main", "summary"]) -> tuple[str, str]:
+    if role == "main":
+        return str(resolved.main_base_url or "").strip(), str(resolved.main_api_key or "")
+    return str(resolved.summary_base_url or "").strip(), str(resolved.summary_api_key or "")
+
+
+async def _discover_models(*, base_url: str, api_key: str, timeout: float) -> list[str]:
+    if AsyncOpenAI is None:  # pragma: no cover - dependency installation issue
+        raise RuntimeError("OpenAI SDK unavailable")
+
+    client = None
+    try:
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        response = await client.models.list()
+        return _normalize_model_ids(response)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                # A close failure must not turn a successful discovery into a
+                # provider error, and must never be sent to the browser.
+                pass
+
+
+def _normalize_model_ids(response: Any) -> list[str]:
+    items: Any
+    if isinstance(response, Mapping):
+        items = response.get("data", [])
+    else:
+        items = getattr(response, "data", response)
+    if isinstance(items, Mapping):
+        items = items.get("data", [])
+    if not isinstance(items, (list, tuple)):
+        return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, Mapping):
+            value = item.get("id")
+        else:
+            value = getattr(item, "id", None)
+        model_id = str(value).strip() if value is not None else ""
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            result.append(model_id)
+    return result
+
+
+def _model_discovery_timeout(config: Any, role: Literal["main", "summary"]) -> float:
+    try:
+        provider = config.llm.for_role(role)
+        timeout = float(getattr(provider, "timeout_s", 30.0))
+        return max(timeout, 1.0)
+    except Exception:
+        return 30.0
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    timeout_names = {"APITimeoutError", "ConnectTimeout", "ReadTimeout", "TimeoutException"}
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, asyncio.TimeoutError)):
+            return True
+        if any(cls.__name__ in timeout_names for cls in type(current).__mro__):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 async def _probe(resolver: Any, role: dict[str, str]) -> dict[str, Any]:
