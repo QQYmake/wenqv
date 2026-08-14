@@ -27,6 +27,8 @@ agent:
   max_tool_retries: 2
   tool_timeout_s: 60
   tool_result_max_chars: 65536
+  default_skills:
+    - wenqu
 
 context:
   token_budget: 32000

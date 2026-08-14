@@ -31,6 +31,25 @@ def test_load_config_require_user_config_defaults_false() -> None:
     assert config.llm.require_user_config is False
 
 
+def test_load_config_supports_default_skills_from_yaml_and_environment(
+    tmp_path: Path,
+) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "agent:\n  default_skills:\n    - wenqu\n",
+        encoding="utf-8",
+    )
+
+    from_yaml = load_config(config_file, environ={})
+    from_env = load_config(
+        config_file,
+        environ={"AGENT_DEFAULT_SKILLS": "alpha, beta, alpha"},
+    )
+
+    assert from_yaml.agent.default_skills == ("wenqu",)
+    assert from_env.agent.default_skills == ("alpha", "beta")
+
+
 def test_build_cipher_fails_fast_when_required_and_no_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -206,6 +206,19 @@ def _compose_agent(
 
         skills_dir = config.workspace.root / "skills"
         skill_manager = SkillManager(skills_dir)
+        agent_config = _construct_supported(
+            AgentConfig,
+            {
+                "max_turns": config.agent.max_turns,
+                "max_tool_retries": config.agent.max_tool_retries,
+                "tool_timeout_s": config.agent.tool_timeout_s,
+                "tool_result_max_chars": config.agent.tool_result_max_chars,
+                "max_result_chars": config.agent.tool_result_max_chars,
+                "default_skills": config.agent.default_skills,
+            },
+        )
+        for name in config.agent.default_skills:
+            skill_manager.get(name)
         # The ClientResolver port replaces the startup-time LLMClientFactory
         # singleton. Per-workspace user configs are honoured via the resolver;
         # when no user config exists it falls back to config.llm.* defaults.
@@ -223,18 +236,11 @@ def _compose_agent(
                 calculator_tool(),
                 *file_tools(),
                 load_skill_tool(skill_manager),
-                remove_skill_tool(skill_manager),
+                remove_skill_tool(
+                    skill_manager,
+                    protected_names=config.agent.default_skills,
+                ),
             ]
-        )
-        agent_config = _construct_supported(
-            AgentConfig,
-            {
-                "max_turns": config.agent.max_turns,
-                "max_tool_retries": config.agent.max_tool_retries,
-                "tool_timeout_s": config.agent.tool_timeout_s,
-                "tool_result_max_chars": config.agent.tool_result_max_chars,
-                "max_result_chars": config.agent.tool_result_max_chars,
-            },
         )
         core = _construct_supported(
             AgentCore,

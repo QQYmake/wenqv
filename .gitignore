@@ -11,10 +11,18 @@ data/
 *.db-shm
 *.db-wal
 .env
+.env.*
+!.env.example
 .agent_secret_key
+*.pem
+*.key
+*.p12
+*.pfx
 修改日志/
 web/node_modules/
 web/dist/
 web/coverage/
 *.tsbuildinfo
 *.log
+# Per-browser workspace directories created when workspace.root is this repository.
+????????-????-????-????-????????????/

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from server.agent import (
     AgentConfig,
     AgentCore,
@@ -12,6 +14,7 @@ from server.agent import (
     LLMStreamChunk,
     ImageAttachment,
     SkillManager,
+    SkillNotFoundError,
     Tool,
     ToolCallDelta,
     ToolRegistry,
@@ -401,3 +404,57 @@ def test_image_tool_result_is_ephemeral_but_reaches_followup_model_turn(tmp_path
     assert any(message.attachments for message in client.stream_calls[1][0])
     persisted = asyncio.run(store.list_messages("images"))
     assert not any(message.attachments for message in persisted)
+
+
+def test_default_skill_loads_once_per_conversation_with_runtime_identity(tmp_path) -> None:
+    skill_dir = tmp_path / "skills" / "wenqu"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: wenqu\ndescription: Persistent training coach\n---\n\n"
+        "Keep every training under the workspace data root.\n",
+        encoding="utf-8",
+    )
+    client = ScriptedClient(
+        [text_response("first"), text_response("second"), text_response("other")]
+    )
+    core, store = make_core(
+        tmp_path,
+        client,
+        config=AgentConfig(default_skills=("wenqu",)),
+        skill_dir=tmp_path / "skills",
+    )
+
+    first = asyncio.run(collect(core.stream("conversation-a", "start")))
+    second = asyncio.run(collect(core.stream("conversation-a", "continue")))
+    other = asyncio.run(collect(core.stream("conversation-b", "start")))
+
+    first_skill = next(event.to_dict() for event in first if event.type == "skill_loaded")
+    second_skill = next(event.to_dict() for event in second if event.type == "skill_loaded")
+    other_skill = next(event.to_dict() for event in other if event.type == "skill_loaded")
+    assert first_skill["status"] == "loaded"
+    assert first_skill["source"] == "default"
+    assert second_skill["status"] == "already_loaded"
+    assert other_skill["status"] == "loaded"
+
+    messages_a = asyncio.run(store.list_messages("conversation-a"))
+    messages_b = asyncio.run(store.list_messages("conversation-b"))
+    injections_a = [
+        message for message in messages_a if message.metadata.get("kind") == "skill_injection"
+    ]
+    injections_b = [
+        message for message in messages_b if message.metadata.get("kind") == "skill_injection"
+    ]
+    assert len(injections_a) == len(injections_b) == 1
+    assert 'conversation_id: "conversation-a"' in injections_a[0].content
+    assert 'conversation_id: "conversation-b"' in injections_b[0].content
+    assert 'workspace_data_root: "wenqu/sessions"' in injections_a[0].content
+    assert "conversation-b" not in injections_a[0].content
+
+
+def test_agent_rejects_a_missing_configured_default_skill(tmp_path) -> None:
+    with pytest.raises(SkillNotFoundError, match="wenqu"):
+        make_core(
+            tmp_path,
+            ScriptedClient([]),
+            config=AgentConfig(default_skills=("wenqu",)),
+        )

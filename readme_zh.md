@@ -14,6 +14,7 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 - **按 workspace 隔离的状态。** `workspace_id` HttpOnly Cookie 让浏览器刷新后仍能访问同一组会话和已保存的模型配置。
 - **加密的模型设置。** 设置面板保存 `main` 和可选 `summary` 两个角色的配置，并用 Fernet 加密 API key；浏览器只能得到掩码后的 key。
 - **Skills 与工具。** 可信 Markdown Skills 可在 UI 中选择、通过 `@skill-name` 提及，或由工具管理。除 `calculator`、`load_skill`、`remove_skill` 外，每次运行都会获得限定 workspace 的 `read`、`write`、`edit`、`grep`、`find`、`ls` 文件工具。
+- **默认问渠工作流。** 目录式 `wenqu` Skill 会自动注入每个 conversation，并路由七个备课阶段；训练文件保存在浏览器 workspace 中，同一浏览器的其他 conversation 可经明确选择后续训。
 - **有界执行。** Agent 轮数、连续工具失败次数、工具超时、工具输出大小和上下文大小都可配置。
 - **低干扰聊天界面。** 助手回合只固定显示一行默认折叠的“思考中”；兼容端点返回纯文本摘要时可点击展开，工具轨迹仍单独可见。
 - **可靠的本地存储。** SQLite 是事实数据源。Redis 仅作为可选的尽力而为旁路缓存；内存 TTL 缓存始终可用。
@@ -39,7 +40,7 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 1. SPA 调用 `GET /api/bootstrap`；服务端创建或复用 HttpOnly `workspace_id` Cookie。
 2. SPA 加载会话、Skills、公开运行限制和掩码后的用户配置。此后，`AuthMiddleware` 将私有 API 请求限定在当前 workspace。
 3. 消息连同 `reasoning_effort` 发往 `POST /api/chat`；API 只接受 `low`、`medium`、`high`、`max`，随后打开 SSE 流。
-4. `AgentCore` 将所选强度原样应用到该次运行的每个 `main` 调用；独立的 `summary` 角色不继承它。
+4. `AgentCore` 在用户消息前为每个 conversation 注入一次默认 Skill，再加载显式选择或提及的 Skill；所选思考强度原样应用到该次运行的每个 `main` 调用，独立的 `summary` 角色不继承它。
 5. 回答、尽力提取的纯文本思考摘要和工具事件以类型化 SSE 返回。回答与思考元数据按同一 `request_id` 持久化，刷新后仍合并为一个助手回合。
 
 ### 上下文与模型角色
@@ -52,7 +53,7 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 
 ### Skills 与工具安全
 
-Skills 是 `<workspace root>/skills` 下的 Markdown 文件；默认配置下即仓库的 [`skills/`](skills/) 目录。每个文件必须带有 front matter：
+Skills 从仓库的 [`skills/`](skills/) 目录加载。推荐结构是 `skills/<name>/SKILL.md`，同时兼容旧的 `skills/<name>.md`；目录名必须与 front matter 的 `name` 一致，避免重复或歧义。每个 Skill 必须带有 front matter：
 
 ```markdown
 ---
@@ -63,7 +64,20 @@ description: Turn a broad goal into a small executable plan.
 在这里写入可信的模型指令。
 ```
 
-已加载的 Skill 会按会话持久化并去重。所有文件工具都可接收相对或绝对路径，但解析结果（包括 symlink）必须位于当前 workspace root 内。这是应用层保护，不是操作系统级 sandbox。
+已加载的 Skill 会按 conversation 持久化并去重。`agent.default_skills`（或 `AGENT_DEFAULT_SKILLS`）会自动加载可信根 Skill，默认 Skill 不能被 `remove_skill` 卸载。所有文件工具都可接收相对或绝对路径，但解析结果（包括 symlink）必须位于当前浏览器 workspace root 内。这是应用层保护，不是操作系统级 sandbox。
+
+仓库默认启用 `wenqu`：一个总控 Skill 加七个阶段 Skill，不再保留功能重合的 `README.md` 或 `AGENT.md`。安装指令与运行数据分离，训练档案统一写到：
+
+```text
+<workspace root>/<workspace_id>/wenqu/sessions/<training_id>/
+  current.md
+  stage_v1.md
+  lesson-v1.md
+  stage_v2.md
+  lesson-v2.md
+```
+
+`current.md.owner_conversation_id` 表示唯一写入 owner。用户要求续训时，即使只有一个候选也必须先列出全部历史训练，确认选择后才转移 owner。删除 conversation 只删除 SQLite 聊天记录，不删除 workspace 里的训练档案；不同浏览器 workspace 仍彼此隔离。
 
 | 工具 | 主要行为 |
 | --- | --- |
@@ -87,7 +101,7 @@ server/
 web/
   src/                 React 应用、API client/SSE parser、组件、视觉场景
   public/fonts/        内置 LXGW WenKai Lite 字体及其许可说明
-skills/                可信 Markdown Skill 目录
+skills/                可信平铺/目录式 Skill；包含问渠工作流
 tests/                 Python 单元/集成测试
 deploy/                Ubuntu + nginx + systemd 部署模板与指南
 docs/architecture.mmd  Mermaid 架构图规范源文件
@@ -144,7 +158,7 @@ npm run dev
 | 配置文件 | `AGENT_CONFIG` |
 | 密钥与身份 | `AGENT_SECRET_KEY`、`AGENT_REQUIRE_USER_CONFIG`、`AGENT_COOKIE_SECURE` |
 | 主 / 摘要模型 | `AGENT_MAIN_*`、`AGENT_SUMMARY_*`（`API_KEY`、`BASE_URL`、`MODEL`、`MAX_TOKENS`、`TIMEOUT_S`、`TEMPERATURE`） |
-| Agent / context 限制 | `AGENT_MAX_TURNS`、`AGENT_MAX_TOOL_RETRIES`、`AGENT_TOOL_TIMEOUT_S`、`AGENT_TOOL_RESULT_MAX_CHARS`、`AGENT_TOKEN_BUDGET`、`AGENT_SUMMARY_TRIGGER_RATIO`、`AGENT_PRESERVE_RECENT_MESSAGES` |
+| Agent / context 限制 | `AGENT_MAX_TURNS`、`AGENT_MAX_TOOL_RETRIES`、`AGENT_TOOL_TIMEOUT_S`、`AGENT_TOOL_RESULT_MAX_CHARS`、`AGENT_DEFAULT_SKILLS`、`AGENT_TOKEN_BUDGET`、`AGENT_SUMMARY_TRIGGER_RATIO`、`AGENT_PRESERVE_RECENT_MESSAGES` |
 | 存储与缓存 | `AGENT_SQLITE_PATH`、`REDIS_URL`、`AGENT_CACHE_TTL_S` |
 | 服务端与 SPA | `AGENT_HOST`、`AGENT_PORT`、`AGENT_CORS_ORIGINS`、`AGENT_STATIC_DIR` |
 | Workspace | `AGENT_WORKSPACE_ID`、`AGENT_WORKSPACE_NAME`、`AGENT_WORKSPACE_ROOT` |

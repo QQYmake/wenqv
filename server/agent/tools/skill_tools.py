@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from ..registry import Tool, ToolExecutionContext, ToolOutput
@@ -57,14 +57,24 @@ def load_skill_tool(manager: SkillManager) -> Tool:
     )
 
 
-def remove_skill_tool(manager: SkillManager) -> Tool:
+def remove_skill_tool(
+    manager: SkillManager,
+    *,
+    protected_names: Collection[str] = (),
+) -> Tool:
     names = [skill.name for skill in manager.list()]
+    protected = frozenset(protected_names)
 
     async def execute(
         arguments: Mapping[str, Any], context: ToolExecutionContext
     ) -> ToolOutput:
         name = str(arguments["name"])
         manager.get(name)
+        if name in protected:
+            return ToolOutput(
+                {"status": "protected", "name": name},
+                {"skill_action": "noop", "skill_name": name},
+            )
         loaded = await context.store.list_session_skills(context.session_id)
         if name not in loaded:
             return ToolOutput(
@@ -84,7 +94,10 @@ def remove_skill_tool(manager: SkillManager) -> Tool:
         property_schema["enum"] = names
     return Tool(
         name="remove_skill",
-        description="Remove a previously loaded skill from future conversation context.",
+        description=(
+            "Remove a previously loaded non-default skill from future conversation "
+            "context. Default skills are protected."
+        ),
         parameters={
             "type": "object",
             "properties": {"name": property_schema},

@@ -14,6 +14,7 @@ It is designed for a trusted private environment: each browser receives a stable
 - **Workspace-scoped state.** A `workspace_id` HttpOnly cookie keeps a browser's sessions and saved model configuration stable across reloads.
 - **Encrypted provider settings.** The Settings panel saves `main` and optional `summary` provider details with Fernet encryption; API keys are only returned to the browser in masked form.
 - **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. Alongside `calculator`, `load_skill`, and `remove_skill`, every run receives workspace-confined `read`, `write`, `edit`, `grep`, `find`, and `ls` file tools.
+- **Default Wenqu workflow.** The packaged `wenqu` Skill is injected once into every conversation and routes its seven coaching stages. Training files live under the browser workspace, so another conversation in the same browser can explicitly resume them.
 - **Bounded execution.** Agent turns, consecutive tool failures, tool timeouts, tool-output size, and context size are configurable limits.
 - **Responsive chat UI.** The frontend shows a compact, collapsed `Thinking` row instead of exposing reasoning inline; compatible plaintext summaries can be expanded, while tool traces remain separate.
 - **Durable local storage.** SQLite is the source of truth. Redis is optional and used only as a best-effort side cache; an in-memory TTL cache is always available.
@@ -39,7 +40,7 @@ The important dependency rule is: **the Agent Core depends on ports, not FastAPI
 1. The SPA calls `GET /api/bootstrap`; the server reuses or creates an HttpOnly `workspace_id` cookie.
 2. The SPA loads sessions, Skills, public limits, and masked user configuration. Private API requests are then scoped to that workspace by `AuthMiddleware`.
 3. A message and its `reasoning_effort` go to `POST /api/chat`. The API accepts exactly `low`, `medium`, `high`, or `max`, allows one active run per workspace/session, then opens an SSE stream.
-4. `AgentCore` applies that effort unchanged to every `main` model call in the run. The separate `summary` role does not inherit it.
+4. `AgentCore` injects configured default Skills before the user message, once per conversation, then adds explicitly selected or mentioned Skills. It applies the reasoning effort unchanged to every `main` model call in the run; the separate `summary` role does not inherit it.
 5. Text, best-effort plaintext reasoning summaries, and tool events flow back as typed SSE. The assistant answer and reasoning metadata are persisted under one request id so history restores as one turn.
 
 ### Context and model roles
@@ -52,7 +53,7 @@ The important dependency rule is: **the Agent Core depends on ports, not FastAPI
 
 ### Skills and tool safety
 
-Skills are Markdown files under `<workspace root>/skills` (the repository's default is [`skills/`](skills/)). They must include front matter:
+Skills are loaded from the repository's [`skills/`](skills/) catalogue. The preferred package layout is `skills/<name>/SKILL.md`; legacy flat `skills/<name>.md` files remain supported. A package directory must match its front-matter `name`, which prevents ambiguous discovery. Every Skill must include front matter:
 
 ```markdown
 ---
@@ -63,7 +64,20 @@ description: Turn a broad goal into a small executable plan.
 Trusted instructions for the model go here.
 ```
 
-Loaded Skills are persisted and deduplicated per conversation. Every file tool accepts relative or absolute paths but resolves them inside the active workspace root, including symlink checks. This is an application-level guard, not an operating-system sandbox.
+Loaded Skills are persisted and deduplicated per conversation. `agent.default_skills` (or `AGENT_DEFAULT_SKILLS`) loads trusted root Skills automatically; default Skills are protected from `remove_skill`. Every file tool accepts relative or absolute paths but resolves them inside the active browser workspace root, including symlink checks. This is an application-level guard, not an operating-system sandbox.
+
+The checked-in default is `wenqu`, adapted as one root package plus seven stage packages without a duplicate `README.md` or `AGENT.md`. Its runtime state is separate from the installed Skill text:
+
+```text
+<workspace root>/<workspace_id>/wenqu/sessions/<training_id>/
+  current.md
+  stage_v1.md
+  lesson-v1.md
+  stage_v2.md
+  lesson-v2.md
+```
+
+`current.md.owner_conversation_id` gives one application conversation write ownership at a time. A resume request always lists every historical training, even when there is only one candidate, and transfers ownership only after the user selects it. Deleting a conversation removes its SQLite history but intentionally preserves these workspace training files. Different browser workspaces remain isolated.
 
 | Tool | Main behavior |
 | --- | --- |
@@ -87,7 +101,7 @@ server/
 web/
   src/                 React application, API client/SSE parser, components, visual scene
   public/fonts/        Bundled LXGW WenKai Lite font and its license information
-skills/                Trusted Markdown Skill catalogue
+skills/                Trusted flat and packaged Skill catalogue; Wenqu workflow
 tests/                 Python unit/integration tests
 deploy/                Ubuntu + nginx + systemd deployment templates and guide
 docs/architecture.mmd  Canonical Mermaid architecture diagram
@@ -144,7 +158,7 @@ Open **Settings** and fill in `main` `base_url`, `api_key`, and `model`. Use **T
 | Config file | `AGENT_CONFIG` |
 | Secret and identity | `AGENT_SECRET_KEY`, `AGENT_REQUIRE_USER_CONFIG`, `AGENT_COOKIE_SECURE` |
 | Main / summary provider | `AGENT_MAIN_*`, `AGENT_SUMMARY_*` (`API_KEY`, `BASE_URL`, `MODEL`, `MAX_TOKENS`, `TIMEOUT_S`, `TEMPERATURE`) |
-| Agent / context limits | `AGENT_MAX_TURNS`, `AGENT_MAX_TOOL_RETRIES`, `AGENT_TOOL_TIMEOUT_S`, `AGENT_TOOL_RESULT_MAX_CHARS`, `AGENT_TOKEN_BUDGET`, `AGENT_SUMMARY_TRIGGER_RATIO`, `AGENT_PRESERVE_RECENT_MESSAGES` |
+| Agent / context limits | `AGENT_MAX_TURNS`, `AGENT_MAX_TOOL_RETRIES`, `AGENT_TOOL_TIMEOUT_S`, `AGENT_TOOL_RESULT_MAX_CHARS`, `AGENT_DEFAULT_SKILLS`, `AGENT_TOKEN_BUDGET`, `AGENT_SUMMARY_TRIGGER_RATIO`, `AGENT_PRESERVE_RECENT_MESSAGES` |
 | Storage and cache | `AGENT_SQLITE_PATH`, `REDIS_URL`, `AGENT_CACHE_TTL_S` |
 | Server and SPA | `AGENT_HOST`, `AGENT_PORT`, `AGENT_CORS_ORIGINS`, `AGENT_STATIC_DIR` |
 | Workspace | `AGENT_WORKSPACE_ID`, `AGENT_WORKSPACE_NAME`, `AGENT_WORKSPACE_ROOT` |

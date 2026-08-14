@@ -34,11 +34,11 @@ flowchart TD
     %% ==================== ③ Agent Core ====================
     subgraph CORE["③ 与 HTTP 无关的 Agent Core — server/agent"]
         direction TB
-        ACORE["AgentCore._stream<br/>可取消 ReAct 循环<br/>reasoning_delta 类型事件"]
+        ACORE["AgentCore._stream<br/>默认 Skill → 显式 Skill → 用户消息<br/>可取消 ReAct 循环"]
         CTX["ContextManager.prepare<br/>token 预算 · summary 摘要 · 确定性截断"]
-        SKILL["SkillManager<br/>scan · inject_selected · @mention"]
+        SKILL["SkillManager<br/>平铺 + 目录包扫描<br/>默认 / 显式注入 · @mention"]
         REG["ToolRegistry + Tool<br/>校验 · 超时 · 结果截断"]
-        TOOLS["基础工具<br/>calculator · load_skill · remove_skill"]
+        TOOLS["基础工具<br/>calculator · load_skill<br/>remove_skill（默认项受保护）"]
         FILETOOLS["全局文件工具<br/>read · write · edit<br/>grep · find · ls"]
         PORTS["端口 ports.py<br/>ClientResolver · ConversationStore<br/>WorkspaceResolver · LLMClient"]
     end
@@ -61,8 +61,9 @@ flowchart TD
         DB[("SQLite 文件")]
         REDIS[("Redis（可选）")]
         REMOTE["OpenAI 兼容<br/>模型端点"]
-        SKILLFILES["skills/*.md"]
-        WFILES["per-workspace 文件"]
+        SKILLFILES["Skill 指令<br/>skills/*.md<br/>skills/*/SKILL.md"]
+        WFILES["per-workspace 文件根<br/>&lt;root&gt;/&lt;workspace_id&gt;"]
+        WENQU["问渠训练档案<br/>wenqu/sessions/&lt;training_id&gt;<br/>current.md + 阶段文件"]
     end
 
     %% ==================== 前端内部 ====================
@@ -92,7 +93,7 @@ flowchart TD
 
     %% ==================== Agent Core 内部 ====================
     ACORE -->|"prepare_context 每轮"| CTX
-    ACORE -->|"inject_selected"| SKILL
+    ACORE -->|"default_skills 每 conversation 一次<br/>再注入选择项"| SKILL
     ACORE -->|"tools.execute"| REG
     REG --> TOOLS & FILETOOLS
     ACORE --> PORTS
@@ -100,6 +101,7 @@ flowchart TD
     ACORE -->|"get_client('main')<br/>同一运行继承所选强度"| PORTS
     TOOLS -->|"load_skill / remove_skill"| SKILL
     FILETOOLS -->|"安全解析 · 读写 · 搜索"| WFILES
+    FILETOOLS -->|"owner 校验 · 显式续训转移"| WENQU
     FILETOOLS -.->|"图片仅当前 run 临时附加"| ACORE
     SKILLFILES -->|"scan"| SKILL
 
@@ -124,12 +126,14 @@ flowchart TD
     RESOLVER -->|"构建 / 池化客户端"| OAI
     OAI -->|"Chat Completions stream / complete"| REMOTE
     WRES --> WFILES
+    WFILES --> WENQU
+    SESSIONS -.->|"删除 conversation<br/>不删除训练档案"| WENQU
 
     %% ==================== 组合根 ====================
     MAIN -.->|"装配 APIServices"| SVC
     MAIN -.->|"构建 store + SideCache"| SQLITE
     MAIN -.->|"构建 ClientResolver"| RESOLVER
-    MAIN -.->|"懒加载组合 AgentCore"| ACORE
+    MAIN -.->|"配置 default_skills<br/>懒加载组合 AgentCore"| ACORE
 
     %% ==================== 图例 ====================
     subgraph LEGEND["图例"]
