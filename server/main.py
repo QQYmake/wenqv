@@ -199,8 +199,8 @@ def _compose_agent(
         from server.agent.skills import SkillManager
         from server.agent.tools import (
             calculator_tool,
+            file_tools,
             load_skill_tool,
-            read_file_tool,
             remove_skill_tool,
         )
 
@@ -221,7 +221,7 @@ def _compose_agent(
         registry = ToolRegistry(
             [
                 calculator_tool(),
-                read_file_tool(),
+                *file_tools(),
                 load_skill_tool(skill_manager),
                 remove_skill_tool(skill_manager),
             ]

@@ -1,6 +1,6 @@
-"""Unit tests for traversal defenses in the resolver and the read_file tool.
+"""Unit tests for traversal defenses in the resolver and the read tool.
 
-The workspace resolver maps ids to private directories; the read_file tool
+The workspace resolver maps ids to private directories; the read tool
 must never resolve a path outside the active workspace root, regardless of
 the attack spelling: POSIX or Windows separators, absolute paths, encoded
 dot-dot sequences, or symlinks pointing out of the root.
@@ -15,7 +15,7 @@ import pytest
 
 from server.agent.memory import InMemoryConversationStore
 from server.agent.registry import ToolExecutionContext
-from server.agent.tools.read_file import read_file_tool
+from server.agent.tools import read_tool
 from server.storage import IsolatedWorkspaceResolver
 
 
@@ -48,14 +48,14 @@ def _context(root) -> ToolExecutionContext:
     )
 
 
-def _read(tool, context, path: str) -> dict:
+def _read(tool, context, path: str) -> str:
     return asyncio.run(tool.executor({"path": path}, context))
 
 
-def test_read_file_rejects_relative_and_absolute_escapes(tmp_path) -> None:
+def test_read_rejects_relative_and_absolute_escapes(tmp_path) -> None:
     resolver = IsolatedWorkspaceResolver(tmp_path)
     alpha_root = resolver("ws-alpha")
-    tool = read_file_tool()
+    tool = read_tool()
     context = _context(alpha_root)
 
     # A file outside the workspace (sibling workspace) as an absolute path.
@@ -71,14 +71,14 @@ def test_read_file_rejects_relative_and_absolute_escapes(tmp_path) -> None:
             _read(tool, context, path)
 
 
-def test_read_file_never_escapes_via_windows_style_or_encoded_paths(tmp_path) -> None:
+def test_read_never_escapes_via_windows_style_or_encoded_paths(tmp_path) -> None:
     resolver = IsolatedWorkspaceResolver(tmp_path)
     alpha_root = resolver("ws-alpha")
     beta_root = resolver("ws-beta")
     beta_secret = beta_root / "secret.txt"
     beta_secret.write_text("beta-secret", encoding="utf-8")
 
-    tool = read_file_tool()
+    tool = read_tool()
     context = _context(alpha_root)
 
     # Windows-style traversal: on Windows the backslash is a separator and the
@@ -104,19 +104,18 @@ def test_read_file_never_escapes_via_windows_style_or_encoded_paths(tmp_path) ->
             assert "beta-secret" not in result.get("content", "")
 
 
-def test_read_file_positive_control_inside_workspace(tmp_path) -> None:
+def test_read_positive_control_inside_workspace(tmp_path) -> None:
     resolver = IsolatedWorkspaceResolver(tmp_path)
     alpha_root = resolver("ws-alpha")
     notes = alpha_root / "notes.txt"
     notes.write_text("alpha-secret", encoding="utf-8")
 
-    tool = read_file_tool()
+    tool = read_tool()
     result = _read(tool, _context(alpha_root), "notes.txt")
-    assert result["content"] == "alpha-secret"
-    assert result["path"] == "notes.txt"
+    assert result == "alpha-secret"
 
 
-def test_read_file_rejects_symlink_escape(tmp_path) -> None:
+def test_read_rejects_symlink_escape(tmp_path) -> None:
     resolver = IsolatedWorkspaceResolver(tmp_path)
     alpha_root = resolver("ws-alpha")
     beta_root = resolver("ws-beta")
@@ -129,6 +128,6 @@ def test_read_file_rejects_symlink_escape(tmp_path) -> None:
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"symlinks unavailable in this environment: {exc}")
 
-    tool = read_file_tool()
+    tool = read_tool()
     with pytest.raises(ValueError, match="outside the active workspace"):
         _read(tool, _context(alpha_root), "escape.txt")

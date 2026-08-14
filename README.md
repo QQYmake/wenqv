@@ -13,7 +13,7 @@ It is designed for a trusted private environment: each browser receives a stable
 - **Persistent conversations.** Create, restore, rename, and delete sessions; messages, tool traces, and loaded Skills are stored in SQLite.
 - **Workspace-scoped state.** A `workspace_id` HttpOnly cookie keeps a browser's sessions and saved model configuration stable across reloads.
 - **Encrypted provider settings.** The Settings panel saves `main` and optional `summary` provider details with Fernet encryption; API keys are only returned to the browser in masked form.
-- **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. The built-ins are `calculator`, workspace-confined `read_file`, `load_skill`, and `remove_skill`.
+- **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. Alongside `calculator`, `load_skill`, and `remove_skill`, every run receives workspace-confined `read`, `write`, `edit`, `grep`, `find`, and `ls` file tools.
 - **Bounded execution.** Agent turns, consecutive tool failures, tool timeouts, tool-output size, and context size are configurable limits.
 - **Responsive chat UI.** The frontend shows a compact, collapsed `Thinking` row instead of exposing reasoning inline; compatible plaintext summaries can be expanded, while tool traces remain separate.
 - **Durable local storage.** SQLite is the source of truth. Redis is optional and used only as a best-effort side cache; an in-memory TTL cache is always available.
@@ -63,7 +63,18 @@ description: Turn a broad goal into a small executable plan.
 Trusted instructions for the model go here.
 ```
 
-Loaded Skills are persisted and deduplicated per conversation. `read_file` resolves paths inside the active workspace root and limits file size; it is an application-level guard, not an operating-system sandbox.
+Loaded Skills are persisted and deduplicated per conversation. Every file tool accepts relative or absolute paths but resolves them inside the active workspace root, including symlink checks. This is an application-level guard, not an operating-system sandbox.
+
+| Tool | Main behavior |
+| --- | --- |
+| `read` | Reads text from a 1-based `offset`, capped at 2,000 lines / 50KB. JPG, PNG, GIF, WebP, and BMP files are resized to a 1,568px longest edge and attached only to the active model run. |
+| `write` | Atomically creates or replaces a UTF-8 file and creates missing parent directories. |
+| `edit` | Atomically applies unique, non-overlapping replacements matched against the original file; its unified diff is shown in the execution trace. |
+| `grep` | Searches non-ignored text files with regex/literal, glob, case, context, and result-limit controls. |
+| `find` | Finds non-ignored files by glob and returns paths relative to the search directory. |
+| `ls` | Lists one directory alphabetically, including dotfiles, with `/` suffixes for directories. |
+
+`grep` and `find` follow Git-compatible `.gitignore` rules and never enter `.git`. Search/list output is capped at 50KB. If an OpenAI-compatible endpoint explicitly rejects image input, the client retries once without image data, tells the model that vision is unavailable, and remembers that limitation for that model client.
 
 ## Repository map
 
@@ -178,5 +189,5 @@ Before exposing this project beyond a trusted private environment, add real auth
 
 - The `workspace_id` cookie and `X-Workspace-ID` scope data; they are **not** authentication or authorization.
 - `AGENT_SECRET_KEY` encrypts stored API keys. Rotating or losing it makes existing encrypted keys unreadable.
-- Files read by `read_file` and the contents of trusted Skills can be sent to the configured remote model endpoint. Keep secrets outside the workspace root and review Skills before enabling them.
+- Text and images returned by `read`, plus the contents of trusted Skills, can be sent to the configured remote model endpoint. Image data is not persisted in SQLite or exposed through SSE. Keep secrets outside the workspace root and review Skills before enabling them.
 - CORS is a browser policy, not access control. Set `AGENT_COOKIE_SECURE=true` for HTTPS deployments.

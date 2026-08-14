@@ -3,7 +3,7 @@
 The agent core owns the workspace isolation *contract* (the
 ``WorkspaceResolver`` port); this adapter owns the filesystem policy: each
 workspace gets a private directory ``<root>/<workspace_id>/`` created lazily on
-first access. Returning distinct roots is what makes ``read_file`` and any
+first access. Returning distinct roots is what makes the global file tools and any
 other file-touching tool workspace-confined — storage rows are already
 filtered by ``workspace_id``; without a per-workspace root every workspace
 would share the same files.

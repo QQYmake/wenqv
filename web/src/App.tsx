@@ -188,6 +188,11 @@ export function hydrateHistory(messages: ChatMessage[]): ChatMessage[] {
                 result: objectPayload?.result ?? payload,
                 error,
                 truncated: Boolean(metadataValue(message, "truncated") ?? objectPayload?.truncated),
+                patch:
+                  typeof metadataValue(message, "ui_patch") === "string"
+                    ? String(metadataValue(message, "ui_patch"))
+                    : undefined,
+                patchTruncated: Boolean(metadataValue(message, "ui_patch_truncated")),
                 status: error ? "error" : "success",
               }
             : trace,
@@ -481,6 +486,8 @@ export function App({ client = api, renderWater = true }: AppProps) {
               result: event.result,
               error: Boolean(event.error),
               truncated: Boolean(event.truncated),
+              patch: typeof event.patch === "string" ? event.patch : undefined,
+              patchTruncated: Boolean(event.patch_truncated),
               status: event.error ? "error" : "success",
             } as ToolTrace;
           });
@@ -491,6 +498,8 @@ export function App({ client = api, renderWater = true }: AppProps) {
               result: event.result,
               error: Boolean(event.error),
               truncated: Boolean(event.truncated),
+              patch: typeof event.patch === "string" ? event.patch : undefined,
+              patchTruncated: Boolean(event.patch_truncated),
               status: event.error ? "error" : "success",
             });
           }

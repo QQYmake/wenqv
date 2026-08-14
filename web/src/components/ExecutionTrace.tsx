@@ -42,6 +42,12 @@ function TraceItem({ trace }: { trace: ToolTrace }) {
             <pre>{formatPayload(trace.result)}</pre>
           </section>
         )}
+        {trace.patch && (
+          <section>
+            <h4>修改差异{trace.patchTruncated ? "（已截断）" : ""}</h4>
+            <pre className="trace-patch">{trace.patch}</pre>
+          </section>
+        )}
       </div>
     </details>
   );

@@ -13,7 +13,7 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 - **持久化会话。** 可创建、恢复、重命名和删除会话；消息、工具执行轨迹与已加载 Skills 保存在 SQLite 中。
 - **按 workspace 隔离的状态。** `workspace_id` HttpOnly Cookie 让浏览器刷新后仍能访问同一组会话和已保存的模型配置。
 - **加密的模型设置。** 设置面板保存 `main` 和可选 `summary` 两个角色的配置，并用 Fernet 加密 API key；浏览器只能得到掩码后的 key。
-- **Skills 与工具。** 可信 Markdown Skills 可在 UI 中选择、通过 `@skill-name` 提及，或由工具管理。内置工具为 `calculator`、限定 workspace 的 `read_file`、`load_skill` 与 `remove_skill`。
+- **Skills 与工具。** 可信 Markdown Skills 可在 UI 中选择、通过 `@skill-name` 提及，或由工具管理。除 `calculator`、`load_skill`、`remove_skill` 外，每次运行都会获得限定 workspace 的 `read`、`write`、`edit`、`grep`、`find`、`ls` 文件工具。
 - **有界执行。** Agent 轮数、连续工具失败次数、工具超时、工具输出大小和上下文大小都可配置。
 - **低干扰聊天界面。** 助手回合只固定显示一行默认折叠的“思考中”；兼容端点返回纯文本摘要时可点击展开，工具轨迹仍单独可见。
 - **可靠的本地存储。** SQLite 是事实数据源。Redis 仅作为可选的尽力而为旁路缓存；内存 TTL 缓存始终可用。
@@ -63,7 +63,18 @@ description: Turn a broad goal into a small executable plan.
 在这里写入可信的模型指令。
 ```
 
-已加载的 Skill 会按会话持久化并去重。`read_file` 只能解析 workspace root 内的路径并限制文件大小；这是应用层保护，不是操作系统级 sandbox。
+已加载的 Skill 会按会话持久化并去重。所有文件工具都可接收相对或绝对路径，但解析结果（包括 symlink）必须位于当前 workspace root 内。这是应用层保护，不是操作系统级 sandbox。
+
+| 工具 | 主要行为 |
+| --- | --- |
+| `read` | 从 1-based `offset` 读取文本，最多 2,000 行 / 50KB；JPG、PNG、GIF、WebP、BMP 会把最长边缩至 1,568px，只在当前模型运行中临时附加。 |
+| `write` | 原子创建或覆盖 UTF-8 文件，并自动创建父目录。 |
+| `edit` | 基于原始文件原子执行唯一、互不重叠的替换；unified diff 会显示在执行轨迹中。 |
+| `grep` | 在未忽略的文本文件中搜索，支持 regex/literal、glob、大小写、上下文和数量限制。 |
+| `find` | 按 glob 查找未忽略文件，返回相对搜索目录的路径。 |
+| `ls` | 按字母列出单个目录，包含点文件，目录名带 `/`。 |
+
+`grep` 与 `find` 遵循 Git-compatible `.gitignore` 规则且不会进入 `.git`；搜索和列表输出最多 50KB。若 OpenAI-compatible 端点明确拒绝图片输入，客户端会去掉图片重试一次，向模型说明视觉不可用，并为该模型客户端记住此限制。
 
 ## 仓库导览
 
@@ -178,5 +189,5 @@ npm run build
 
 - `workspace_id` Cookie 与 `X-Workspace-ID` 只做数据作用域划分，**不构成认证或授权**。
 - `AGENT_SECRET_KEY` 用于加密保存的 API key。轮换或丢失它，会使旧的加密 key 无法读取。
-- `read_file` 读取的文件和可信 Skill 的内容可能被发送到配置的远程模型端点。应把 secrets 放在 workspace root 外，并在启用前审查 Skills。
+- `read` 返回的文本、图片以及可信 Skill 内容可能被发送到配置的远程模型端点。图片数据不会写入 SQLite，也不会通过 SSE 暴露。应把 secrets 放在 workspace root 外，并在启用前审查 Skills。
 - CORS 是浏览器策略，不是访问控制。HTTPS 部署必须设置 `AGENT_COOKIE_SECURE=true`。

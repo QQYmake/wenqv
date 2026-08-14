@@ -10,7 +10,7 @@ from server.agent.llm import (
     OpenAICompatClient,
     _reasoning_text,
 )
-from server.agent.models import ChatMessage, LLMResponse, LLMStreamChunk
+from server.agent.models import ChatMessage, ImageAttachment, LLMResponse, LLMStreamChunk
 
 
 class FakeClient:
@@ -105,6 +105,78 @@ def test_structured_or_opaque_reasoning_is_ignored() -> None:
         },
     )()
     assert _reasoning_text(delta) == ""
+
+
+def test_chat_message_serializes_ephemeral_images_as_user_content_parts() -> None:
+    attachment = ImageAttachment(
+        path="diagram.png",
+        data_url="data:image/png;base64,AA==",
+        media_type="image/png",
+        width=10,
+        height=20,
+    )
+    message = ChatMessage(role="user", content="inspect", attachments=(attachment,))
+    assert message.to_llm_dict()["content"] == [
+        {"type": "text", "text": "inspect"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AA==", "detail": "auto"},
+        },
+    ]
+    assert "attachments" not in message.to_dict()
+
+
+def test_openai_client_retries_explicit_vision_rejection_once_without_images() -> None:
+    class VisionError(Exception):
+        status_code = 400
+        body = {"message": "image_url is unsupported by this model"}
+
+    class Streaming:
+        def __aiter__(self):
+            async def iterate():
+                choice = type(
+                    "Choice",
+                    (),
+                    {
+                        "delta": type("Delta", (), {"content": "ok", "tool_calls": ()})(),
+                        "finish_reason": "stop",
+                    },
+                )()
+                yield type("Chunk", (), {"choices": [choice]})()
+            return iterate()
+
+    class Completions:
+        def __init__(self):
+            self.calls = []
+
+        async def create(self, **request):
+            self.calls.append(request)
+            if len(self.calls) == 1:
+                raise VisionError("image content part is not supported")
+            return Streaming()
+
+    completions = Completions()
+    sdk = type("SDK", (), {"chat": type("Chat", (), {"completions": completions})()})()
+    client = OpenAICompatClient(
+        LLMConfig("https://example.test/v1", "key", "model"), sdk_client=sdk
+    )
+    attachment = ImageAttachment(
+        "image.png", "data:image/png;base64,AA==", "image/png", 1, 1
+    )
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in client.stream(
+                [ChatMessage(role="user", content="look", attachments=(attachment,))]
+            )
+        ]
+
+    chunks = __import__("asyncio").run(collect())
+    assert chunks[0].content_delta == "ok"
+    assert len(completions.calls) == 2
+    assert isinstance(completions.calls[0]["messages"][0]["content"], list)
+    assert "does not support visual input" in completions.calls[1]["messages"][0]["content"]
 
 
 def test_factory_accepts_an_application_config_object() -> None:
