@@ -41,15 +41,29 @@ describe("App", () => {
     document.documentElement.removeAttribute("data-theme");
   });
 
-  it("shows the quiet welcome state and lets a suggestion seed the composer", async () => {
+  it("shows the Wenqu training welcome state and lets an entry seed the composer", async () => {
     const user = userEvent.setup();
     render(<App client={makeClient()} renderWater={false} />);
 
-    expect(screen.getByRole("heading", { name: "今天，我们从哪里开始？" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /梳理思路/ }));
+    expect(screen.getByRole("heading", { name: /从课题开始，\s*完成一轮备课训练/ })).toBeInTheDocument();
+    expect(screen.getByText("WENQU · 高中备课实训")).toBeInTheDocument();
+    expect(screen.getByText("面向高中数学、英语师范生与青年教师，完成共创、试讲、评课和迭代。")).toBeInTheDocument();
+    expect(screen.getAllByText("问渠", { exact: true })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /任务识别/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /逐级共创/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /试讲迭代/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /任务识别/ }));
 
     expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue(
-      "帮我把一个还很模糊的想法梳理成目标、约束与下一步。",
+      "开始问渠备课训练，先确认学科、课题、课型和学生基础。",
+    );
+    await user.click(screen.getByRole("button", { name: /逐级共创/ }));
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue(
+      "深度共创一个高中数学或英语课题，完成目标、重难点、过程和作业。",
+    );
+    await user.click(screen.getByRole("button", { name: /试讲迭代/ }));
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue(
+      "继续试讲、评课或迭代教案，先检查当前训练进度。",
     );
     expect(await screen.findByText("lake-main-1")).toBeInTheDocument();
   });

@@ -2,19 +2,19 @@ import { Icon } from "./Icon";
 
 const suggestions = [
   {
-    label: "梳理思路",
-    description: "把零散想法整理成清楚的行动路径",
-    prompt: "帮我把一个还很模糊的想法梳理成目标、约束与下一步。",
+    label: "任务识别",
+    description: "明确学科、课题与学情。",
+    prompt: "开始问渠备课训练，先确认学科、课题、课型和学生基础。",
   },
   {
-    label: "阅读项目",
-    description: "分析材料，保留结构并指出关键问题",
-    prompt: "请阅读我接下来提供的项目材料，先还原结构，再指出风险和优先级。",
+    label: "逐级共创",
+    description: "共创目标、重难点、过程与作业。",
+    prompt: "深度共创一个高中数学或英语课题，完成目标、重难点、过程和作业。",
   },
   {
-    label: "一起实现",
-    description: "拆解任务，并在工具协作中逐步完成",
-    prompt: "和我一起实现一个功能：先确认验收标准，再给出最小可行方案。",
+    label: "试讲迭代",
+    description: "模拟课堂，评课并更新教案。",
+    prompt: "继续试讲、评课或迭代教案，先检查当前训练进度。",
   },
 ];
 
@@ -27,10 +27,9 @@ export function Welcome({ onSuggestion }: { onSuggestion: (prompt: string) => vo
           <span className="welcome-ripple welcome-ripple--one" />
           <span className="welcome-ripple welcome-ripple--two" />
         </div>
-        <p className="welcome-kicker">A QUIET PLACE TO THINK</p>
-        <h1 id="welcome-title">今天，我们从哪里开始？</h1>
-        <p className="welcome-subtitle">把问题放在这里。工具、Skills 与上下文会在需要时自然加入。</p>
-        <p className="welcome-hint">记住此浏览器以保持你的对话与文件。清除浏览器数据将退出当前工作区。</p>
+        <p className="welcome-kicker">WENQU · 高中备课实训</p>
+        <h1 id="welcome-title">从课题开始，<br />完成一轮备课训练</h1>
+        <p className="welcome-subtitle">面向高中数学、英语师范生与青年教师，完成共创、试讲、评课和迭代。</p>
       </div>
 
       <div className="suggestion-grid" aria-label="建议开场">
