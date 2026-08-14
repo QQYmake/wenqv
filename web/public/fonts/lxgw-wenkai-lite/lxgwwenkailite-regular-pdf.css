@@ -1,0 +1,10 @@
+/*
+ * PDF-only font face. Keep the browser stylesheet split into unicode ranges;
+ * WeasyPrint must load one complete WOFF2 to preserve CJK character mapping.
+ */
+@font-face {
+  font-family: "LXGW WenKai Lite";
+  font-style: normal;
+  font-weight: 400;
+  src: url("./files/lxgwwenkailite-regular-full.woff2") format("woff2");
+}

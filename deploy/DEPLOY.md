@@ -60,11 +60,12 @@ sudo DEBIAN_FRONTEND=noninteractive apt install -y \
   nginx certbot \
   libpango-1.0-0 libpangoft2-1.0-0 \
   libharfbuzz0b libharfbuzz-subset0 \
+  libffi-dev libjpeg-dev libopenjp2-7-dev \
   fontconfig shared-mime-info pango1.0-tools \
   poppler-utils
 ~~~
 
-这里的 WeasyPrint runtime 包对应当前 69.0 wheel 路径：libpango-1.0-0、libpangoft2-1.0-0、libharfbuzz0b、libharfbuzz-subset0。fontconfig 用于字体发现/缓存；poppler-utils 只用于本部署文档后面的 pdftotext、pdffonts、pdfinfo smoke test，不是应用运行时必须包。
+这里的 WeasyPrint 69.0 wheel 运行时至少需要 `libpango-1.0-0`、`libpangoft2-1.0-0`、`libharfbuzz0b` 和 `libharfbuzz-subset0`；`libffi-dev`、`libjpeg-dev`、`libopenjp2-7-dev` 同时覆盖 pip 退回源码构建时的依赖。`fontconfig` 用于字体发现/缓存；`poppler-utils` 只用于本部署文档后面的 `pdftotext`、`pdffonts`、`pdfinfo` smoke test，不是应用运行时必须包。不要只安装 Python 包而跳过这一步。
 
 确认 Python 版本满足项目声明：
 
@@ -126,6 +127,7 @@ cd "$APP_DIR"
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip check
 
 .venv/bin/python -c '
 import aiosqlite, cryptography, docx, fastapi, markdown_it, uvicorn, weasyprint
@@ -162,8 +164,12 @@ SQLite 路径和 workspace 根目录由环境文件覆盖，避免把可写数�
 sudo install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 \
   "$STATE_DIR/data" "$STATE_DIR/workspaces"
 sudo -u "$SERVICE_USER" test -r "$APP_DIR/web/public/fonts/lxgw-wenkai-lite/lxgwwenkailite-regular.css"
+sudo -u "$SERVICE_USER" test -r "$APP_DIR/web/public/fonts/lxgw-wenkai-lite/lxgwwenkailite-regular-pdf.css"
+sudo -u "$SERVICE_USER" test -r "$APP_DIR/web/public/fonts/lxgw-wenkai-lite/files/lxgwwenkailite-regular-full.woff2"
 sudo find "$APP_DIR/web/public/fonts/lxgw-wenkai-lite/files" -type f -name '*.woff2' | head
 ~~~
+
+浏览器继续使用 Unicode 分片字体；PDF 导出使用 `lxgwwenkailite-regular-pdf.css` 和完整的 `lxgwwenkailite-regular-full.woff2`。两者都必须能由服务用户读取。该 PDF 专用字体来自官方 LXGW WenKai Lite v1.250 TTF 转换，许可见 checkout 内的 `web/public/fonts/lxgw-wenkai-lite/OFL.txt`。
 
 应用会按 workspace 创建 <workspace_id>/.agent-exports/，导出文件和 manifest 均由 bluelake-agent 写入；下载接口只接受 32 位十六进制 opaque ID，并重新按当前 workspace 解析。
 
@@ -325,9 +331,9 @@ curl --fail --silent --show-error --head "https://$DOMAIN/assets/does-not-exist.
 4. 新建会话后发送消息，Network 中 POST /api/chat 的响应类型为 text/event-stream，能持续收到 text_delta 并以 done 结束；
 5. Agent 通过 export_file 生成 md、txt、docx、pdf，四种文件都能从浏览器下载。
 
-## 16. 中文 PDF 真实 smoke test
+## 16. 四种格式真实 export smoke test
 
-不要只在 Windows 开发机检查。脚本会在生产 venv 中生成包含中文标题/正文、粗体、斜体、有序/无序列表、代码块、表格和链接的 PDF，然后通过当前 HTTPS 域名调用真实 GET /api/files/{file_id} 下载，再用 Poppler 检查 PDF 文本、页数和嵌入字体：
+不要只检查 Python import，也不要只在 Windows 开发机检查。脚本会在生产 venv 中实际生成 `md`、`txt`、`docx`、`pdf` 四种文件，通过当前 HTTPS 域名调用真实 GET `/api/files/{file_id}` 下载，并检查四种响应的状态码、Content-Type 与 Content-Disposition；PDF 另外用 Poppler 检查文本、页数和嵌入字体：
 
 ~~~bash
 sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/python" \
@@ -336,9 +342,10 @@ sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/python" \
   --workspace-root "$STATE_DIR/workspaces"
 ~~~
 
-成功条件：命令输出 PDF smoke test passed，且同时满足：
+成功条件：命令输出 `export smoke test passed`，且同时满足：
 
-- PDF 生成成功，下载 HTTP status 为 200，文件以 %PDF 开头且大小大于 0；
+- md、txt、docx、pdf 均生成成功，下载 HTTP status 都为 200，且 Content-Disposition 都是 attachment；
+- md 内容保持 Markdown，txt 为纯文本，docx 以 PK 开头且 PDF 以 %PDF 开头；
 - pdftotext 能读到中文标题、正文、列表、代码、表格标记和链接文字；
 - pdffonts 至少发现一个嵌入字体；
 - pdfinfo 显示至少 1 页；
@@ -453,7 +460,7 @@ AGENT_SECRET_KEY 必须单独以受控方式保存；数据库备份没有它，
 | /api 返回 SPA HTML | nginx -T | /api/ 必须是 ^~ proxy location；proxy_pass 不能带尾部 /。 |
 | SSE 一次性返回或超时 | curl -N、nginx -T、journalctl -u myapp -f | 确认 /api/ 的 proxy_buffering off、长 proxy_read_timeout，以及 FastAPI 返回 X-Accel-Buffering: no。 |
 | PDF/DOCX 生成 storage_failed | namei -l "$STATE_DIR/workspaces"、journalctl -u myapp | workspace 根必须由 bluelake-agent 可写；不要把它误设为只读 checkout。 |
-| PDF 中文是方框或没有字体 | ls "$APP_DIR/web/public/fonts/lxgw-wenkai-lite/files"、pdffonts | 确认字体文件随 Git checkout 存在且服务用户可读，再重新执行 PDF smoke test。 |
+| PDF 中文乱码、方框或没有字体 | test -r "$APP_DIR/web/public/fonts/lxgw-wenkai-lite/lxgwwenkailite-regular-pdf.css"、test -r "$APP_DIR/web/public/fonts/lxgw-wenkai-lite/files/lxgwwenkailite-regular-full.woff2"、pdffonts | 确认 PDF 专用 CSS 和完整字体随 Git checkout 存在且服务用户可读，再重新执行 PDF smoke test。 |
 | 下载接口 404 | 检查浏览器的 workspace_id Cookie、.agent-exports manifest 和 AGENT_WORKSPACE_ROOT | file ID 只在生成它的 workspace 中有效；不要直接把文件路径拼到 URL。 |
 | 已保存 API key 解密失败 | stat "$ENV_FILE"、确认 AGENT_SECRET_KEY 未改变 | 恢复首次部署保存的固定 key；不要重新生成 key 作为“修复”。 |
 | Certbot challenge 失败 | getent ahosts "$DOMAIN"、UFW、安全组、curl http://$DOMAIN/.well-known/... | 确认 A/AAAA、80 端口和 bootstrap 配置都指向本机；证书成功后再安装 HTTPS 模板。 |

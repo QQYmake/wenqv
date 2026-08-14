@@ -35,8 +35,9 @@ def export_file_tool(exporter: DocumentExporter | None = None) -> Tool:
     return Tool(
         name="export_file",
         description=(
-            "Export Markdown content as a downloadable md, txt, docx, or pdf file. "
-            "Always pass the document body as Markdown; the server performs conversion."
+            "Export valid Markdown content as a downloadable md, txt, docx, or pdf file. "
+            "Always pass the document body as valid Markdown; the server performs conversion. "
+            "When a list ends before an independent paragraph, leave a blank line between them."
         ),
         parameters={
             "type": "object",

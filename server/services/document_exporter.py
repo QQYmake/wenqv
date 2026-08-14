@@ -61,6 +61,7 @@ class ExportedFile:
 
     def to_result(self) -> dict[str, str]:
         return {
+            "file_id": self.file_id,
             "filename": self.filename,
             "download_url": self.download_url,
             "mime_type": self.mime_type,

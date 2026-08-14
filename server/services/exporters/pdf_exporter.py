@@ -7,16 +7,32 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .errors import ExportConversionError
-from .markdown_ast import markdown_parser
+from .markdown_ast import render_markdown
 from .pdf_template import PDF_CSS, build_pdf_html
 
 
+PDF_FONT_CSS_FILENAME = "lxgwwenkailite-regular-pdf.css"
+PDF_FONT_FILENAME = "files/lxgwwenkailite-regular-full.woff2"
+
+
 def markdown_to_html(content: str) -> str:
-    return markdown_parser().render(content)
+    return render_markdown(content)
 
 
 def _font_directory() -> Path:
     return Path(__file__).resolve().parents[3] / "web" / "public" / "fonts" / "lxgw-wenkai-lite"
+
+
+def _pdf_font_assets(font_directory: Path) -> tuple[Path, Path]:
+    """Return the PDF-only CSS and complete WOFF2, or a stable asset error."""
+
+    font_css_path = font_directory / PDF_FONT_CSS_FILENAME
+    font_path = font_directory / PDF_FONT_FILENAME
+    if not font_css_path.is_file() or not font_path.is_file():
+        raise ExportConversionError(
+            "pdf_font_missing", "The bundled PDF Chinese font assets are unavailable"
+        )
+    return font_css_path, font_path
 
 
 def _font_only_url_fetcher(font_directory: Path, url_fetcher_type: object, fatal_error_type: object) -> object:
@@ -25,7 +41,7 @@ def _font_only_url_fetcher(font_directory: Path, url_fetcher_type: object, fatal
     Markdown HTML is model-supplied. We intentionally do not delegate arbitrary
     URLs to WeasyPrint's default fetcher because it can read local ``file://``
     resources and make HTTP requests. The renderer only needs the ``.woff2``
-    files referenced by the checked-in LXGW CSS.
+    files referenced by the checked-in PDF-only LXGW CSS.
     """
 
     class FontOnlyURLFetcher(url_fetcher_type):  # type: ignore[misc,valid-type]
@@ -60,6 +76,8 @@ def _font_only_url_fetcher(font_directory: Path, url_fetcher_type: object, fatal
 
 
 def markdown_to_pdf(content: str) -> bytes:
+    font_directory = _font_directory()
+    font_css_path, _font_path = _pdf_font_assets(font_directory)
     try:
         from weasyprint import CSS, HTML
         from weasyprint.text.fonts import FontConfiguration
@@ -70,12 +88,6 @@ def markdown_to_pdf(content: str) -> bytes:
             "WeasyPrint and its native text-rendering libraries are required for PDF export",
         ) from exc
 
-    font_directory = _font_directory()
-    font_css_path = font_directory / "lxgwwenkailite-regular.css"
-    if not font_css_path.is_file():
-        raise ExportConversionError(
-            "pdf_font_missing", "The bundled Chinese font assets are unavailable"
-        )
     try:
         font_config = FontConfiguration()
         url_fetcher = _font_only_url_fetcher(

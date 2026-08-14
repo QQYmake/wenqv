@@ -67,6 +67,7 @@ def test_agent_can_call_export_file_and_return_download_metadata(tmp_path: Path)
         result = next(event for event in events if event["type"] == "tool_result")
         assert result["name"] == "export_file"
         assert result["error"] is False
+        assert result["result"]["file_id"] == result["result"]["download_url"].rsplit("/", 1)[-1]
         assert result["result"]["filename"] == "agent-report.md"
         assert result["result"]["download_url"].startswith("/api/files/")
         assert (tmp_path / ".agent-exports").is_dir()

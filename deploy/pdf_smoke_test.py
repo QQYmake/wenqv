@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and download a real Chinese PDF through the deployed HTTP API.
+"""Generate and download all export formats through the deployed HTTP API.
 
 Run this on Ubuntu with the application virtualenv after nginx and HTTPS are
 ready, for example:
@@ -48,6 +48,13 @@ print("你好，Ubuntu")
 这是一个[打开链接](https://example.com)的测试。
 """
 
+EXPORT_MIME_TYPES = {
+    "md": "text/markdown",
+    "txt": "text/plain",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pdf": "application/pdf",
+}
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -61,9 +68,14 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _run_text_command(command: list[str], pdf_path: Path) -> str:
+    arguments = [*command, str(pdf_path)]
+    if command[0] == "pdftotext":
+        # Without an explicit output path pdftotext writes beside the input
+        # file, leaving stdout empty and making the text assertions ineffective.
+        arguments.append("-")
     try:
         completed = subprocess.run(
-            [*command, str(pdf_path)],
+            arguments,
             check=True,
             capture_output=True,
             text=True,
@@ -91,11 +103,12 @@ def _check_pdf(pdf_path: Path) -> None:
         "中文正文",
         "粗体",
         "斜体",
-        "无序列表项目",
-        "有序列表项目",
+        "列表项目",
+        "第二个列表项目",
         "print",
-        "中文字体",
-        "42",
+        "项目",
+        "状态",
+        "表格",
         "打开链接",
     ):
         if marker not in extracted:
@@ -116,12 +129,44 @@ def _check_pdf(pdf_path: Path) -> None:
         raise RuntimeError("PDF page-count check failed")
 
 
+def _check_download(exported: ExportedFile, response: httpx.Response) -> None:
+    response.raise_for_status()
+    content_type = response.headers.get("content-type", "")
+    if not content_type.startswith(EXPORT_MIME_TYPES[exported.format]):
+        raise RuntimeError(
+            f"{exported.format} Content-Type mismatch: {content_type!r}"
+        )
+    disposition = response.headers.get("content-disposition", "")
+    if "attachment" not in disposition.lower():
+        raise RuntimeError(f"{exported.format} response is not an attachment")
+    if exported.filename not in disposition and "filename*=" not in disposition:
+        raise RuntimeError(f"{exported.format} filename is missing from Content-Disposition")
+
+    data = response.content
+    if not data:
+        raise RuntimeError(f"{exported.format} download is empty")
+    if exported.format == "md" and data != SMOKE_MARKDOWN.encode("utf-8"):
+        raise RuntimeError("Markdown download content changed")
+    if exported.format == "txt":
+        text = data.decode("utf-8")
+        if "中文 PDF 导出 Smoke Test" not in text or "粗体" not in text:
+            raise RuntimeError("text download is missing smoke markers")
+    elif exported.format == "docx" and not data.startswith(b"PK"):
+        raise RuntimeError("DOCX download is not a ZIP package")
+    elif exported.format == "pdf":
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
+            pdf_path = Path(handle.name)
+            handle.write(data)
+        try:
+            _check_pdf(pdf_path)
+        finally:
+            pdf_path.unlink(missing_ok=True)
+
+
 def main() -> int:
     args = _parse_args()
     exporter = DocumentExporter()
     workspace_root = Path(args.workspace_root).resolve()
-    exported: ExportedFile | None = None
-
     with httpx.Client(
         base_url=args.base_url.rstrip("/"),
         follow_redirects=True,
@@ -133,28 +178,21 @@ def main() -> int:
         bootstrap.raise_for_status()
         workspace_id = str(bootstrap.json()["workspace_id"])
 
-        exported = exporter.export(
-            filename="production-pdf-smoke",
-            format="pdf",
-            content=SMOKE_MARKDOWN,
-            workspace_root=workspace_root / workspace_id,
-        )
-
-        try:
-            response = client.get(exported.download_url)
-            response.raise_for_status()
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
-                downloaded_path = Path(handle.name)
-                handle.write(response.content)
+        for format_name in ("md", "txt", "docx", "pdf"):
+            exported = exporter.export(
+                filename=f"production-{format_name}-smoke",
+                format=format_name,
+                content=SMOKE_MARKDOWN,
+                workspace_root=workspace_root / workspace_id,
+            )
             try:
-                _check_pdf(downloaded_path)
+                response = client.get(exported.download_url)
+                _check_download(exported, response)
             finally:
-                downloaded_path.unlink(missing_ok=True)
-        finally:
-            exported.path.unlink(missing_ok=True)
-            exported.path.with_suffix(".json").unlink(missing_ok=True)
+                exported.path.unlink(missing_ok=True)
+                exported.path.with_suffix(".json").unlink(missing_ok=True)
 
-    print("PDF smoke test passed: generated, downloaded, extracted Chinese text, and verified embedded fonts")
+    print("export smoke test passed: generated and downloaded md, txt, docx, and pdf")
     return 0
 
 
@@ -162,4 +200,4 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-        raise SystemExit(f"PDF smoke test failed: {exc}") from exc
+        raise SystemExit(f"export smoke test failed: {exc}") from exc

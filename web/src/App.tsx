@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type AgentApi } from "./api/client";
+import { parseExportFileResult, triggerFileDownload } from "./api/download";
 import { Composer } from "./components/Composer";
 import { Icon } from "./components/Icon";
 import { MessageList } from "./components/MessageList";
@@ -240,6 +241,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
   const sendingRef = useRef(false);
   const skipSessionLoadRef = useRef<string | null>(null);
   const activeSessionRef = useRef<string | null>(null);
+  const downloadedExportCallsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     activeSessionRef.current = activeSessionId;
@@ -474,6 +476,21 @@ export function App({ client = api, renderWater = true }: AppProps) {
         break;
       }
       case "tool_result":
+        if (event.name === "export_file" && !event.error) {
+          const callId =
+            typeof event.call_id === "string"
+              ? event.call_id
+              : typeof event.tool_call_id === "string"
+                ? event.tool_call_id
+                : "";
+          if (callId && !downloadedExportCallsRef.current.has(callId)) {
+            const file = parseExportFileResult(parseMaybeJson(event.result));
+            if (file) {
+              downloadedExportCallsRef.current.add(callId);
+              triggerFileDownload(file);
+            }
+          }
+        }
         updateAssistant(assistantId, (message) => {
           const callId = String(event.call_id ?? event.tool_call_id ?? uniqueId("tool"));
           let found = false;

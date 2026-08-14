@@ -146,8 +146,12 @@ describe("App", () => {
     });
   });
 
-  it("renders a direct download action for a successful export_file result", async () => {
+  it("automatically downloads a successful export once per tool_call_id", async () => {
     const user = userEvent.setup();
+    const clicked: HTMLAnchorElement[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      clicked.push(this);
+    });
     const client = makeClient({
       events: [
         { type: "tool_call", call_id: "export-1", name: "export_file", arguments: {} },
@@ -156,6 +160,30 @@ describe("App", () => {
           call_id: "export-1",
           name: "export_file",
           result: {
+            file_id: "0123456789abcdef0123456789abcdef",
+            filename: "report.pdf",
+            download_url: "/api/files/0123456789abcdef0123456789abcdef",
+            mime_type: "application/pdf",
+          },
+        },
+        {
+          type: "tool_result",
+          call_id: "export-1",
+          name: "export_file",
+          result: {
+            file_id: "0123456789abcdef0123456789abcdef",
+            filename: "report.pdf",
+            download_url: "/api/files/0123456789abcdef0123456789abcdef",
+            mime_type: "application/pdf",
+          },
+        },
+        { type: "tool_call", call_id: "export-2", name: "export_file", arguments: {} },
+        {
+          type: "tool_result",
+          call_id: "export-2",
+          name: "export_file",
+          result: {
+            file_id: "0123456789abcdef0123456789abcdef",
             filename: "report.pdf",
             download_url: "/api/files/0123456789abcdef0123456789abcdef",
             mime_type: "application/pdf",
@@ -169,9 +197,43 @@ describe("App", () => {
     await user.type(screen.getByRole("textbox", { name: "消息" }), "导出报告");
     await user.click(screen.getByRole("button", { name: "发送消息" }));
 
-    const link = await screen.findByRole("link", { name: "下载 report.pdf" });
-    expect(link).toHaveAttribute("href", "/api/files/0123456789abcdef0123456789abcdef");
-    expect(link).toHaveAttribute("download", "report.pdf");
+    await waitFor(() => expect(clicked).toHaveLength(2));
+    expect(clicked[0].getAttribute("href")).toBe(
+      "/api/files/0123456789abcdef0123456789abcdef",
+    );
+    expect(clicked[0].download).toBe("report.pdf");
+    expect(screen.queryByRole("link", { name: /下载 report\.pdf/ })).not.toBeInTheDocument();
+  });
+
+  it("does not download an export_file error result", async () => {
+    const user = userEvent.setup();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const client = makeClient({
+      events: [
+        { type: "tool_call", call_id: "export-error", name: "export_file", arguments: {} },
+        {
+          type: "tool_result",
+          call_id: "export-error",
+          name: "export_file",
+          error: true,
+          result: {
+            error: true,
+            file_id: "0123456789abcdef0123456789abcdef",
+            filename: "report.pdf",
+            download_url: "/api/files/0123456789abcdef0123456789abcdef",
+            mime_type: "application/pdf",
+          },
+        },
+        { type: "done" },
+      ],
+    });
+    render(<App client={client} renderWater={false} />);
+
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "导出报告");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText("export_file");
+
+    expect(click).not.toHaveBeenCalled();
   });
 
   it("remembers the per-turn reasoning effort and keeps the marker without a summary", async () => {

@@ -14,7 +14,7 @@ It is designed for a trusted private environment: each browser receives a stable
 - **Workspace-scoped state.** A `workspace_id` HttpOnly cookie keeps a browser's sessions and saved model configuration stable across reloads.
 - **Encrypted provider settings.** The Settings panel saves `main` and optional `summary` provider details with Fernet encryption; API keys are only returned to the browser in masked form.
 - **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. Alongside `calculator`, `load_skill`, and `remove_skill`, every run receives workspace-confined `read`, `write`, `edit`, `grep`, `find`, and `ls` file tools.
-- **Markdown document export.** The `export_file` Tool converts Markdown into `md`, `txt`, `docx`, or `pdf`, stores the result under the active workspace, and returns only an opaque `/api/files/{file_id}` download URL. DOCX uses `python-docx`; PDF uses a Markdown-to-HTML template with the bundled LXGW WenKai Lite font CSS and requires WeasyPrint's native text-rendering libraries at runtime.
+- **Markdown document export.** The `export_file` Tool converts Markdown into `md`, `txt`, `docx`, or `pdf`, stores the result under the active workspace, and returns an opaque `file_id`, filename, MIME type, and relative `/api/files/{file_id}` download URL. A successful SSE tool result triggers one browser download per `tool_call_id`; no extra download click is required. DOCX uses `python-docx`; PDF uses a Markdown-to-HTML template with the bundled LXGW WenKai Lite font CSS and requires WeasyPrint's native text-rendering libraries at runtime.
 - **Default Wenqu workflow.** The packaged `wenqu` Skill is injected once into every conversation and routes its seven coaching stages. Training files live under the browser workspace, so another conversation in the same browser can explicitly resume them.
 - **Bounded execution.** Agent turns, consecutive tool failures, tool timeouts, tool-output size, and context size are configurable limits.
 - **Responsive chat UI.** The frontend shows a compact, collapsed `Thinking` row instead of exposing reasoning inline; compatible plaintext summaries can be expanded, while tool traces remain separate.
@@ -88,7 +88,7 @@ The checked-in default is `wenqu`, adapted as one root package plus seven stage 
 | `grep` | Searches non-ignored text files with regex/literal, glob, case, context, and result-limit controls. |
 | `find` | Finds non-ignored files by glob and returns paths relative to the search directory. |
 | `ls` | Lists one directory alphabetically, including dotfiles, with `/` suffixes for directories. |
-| `export_file` | Converts Markdown to `md`, `txt`, `docx`, or `pdf`, enforces input/output limits, and returns a filename, MIME type, and opaque download URL. |
+| `export_file` | Converts Markdown to `md`, `txt`, `docx`, or `pdf`, enforces input/output limits, and returns a file ID, filename, MIME type, and opaque download URL. |
 
 `grep` and `find` follow Git-compatible `.gitignore` rules and never enter `.git`. Search/list output is capped at 50KB. If an OpenAI-compatible endpoint explicitly rejects image input, the client retries once without image data, tells the model that vision is unavailable, and remembers that limitation for that model client.
 
@@ -107,10 +107,11 @@ web/
 skills/                Trusted flat and packaged Skill catalogue; Wenqu workflow
 tests/                 Python unit/integration tests
 deploy/                Ubuntu + nginx + systemd deployment templates and guide
+start.bat / start.sh   Windows / Ubuntu development launchers
 docs/architecture.mmd  Canonical Mermaid architecture diagram
 ```
 
-## Quick start (Windows development)
+## Quick start (local development)
 
 ### Prerequisites
 
@@ -123,11 +124,27 @@ docs/architecture.mmd  Canonical Mermaid architecture diagram
 
 ### 1. Install dependencies
 
+Windows PowerShell:
+
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
+```
 
+Ubuntu / WSL:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip
+
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
+On either platform, install the frontend dependencies:
+
+```text
 cd web
 npm ci
 cd ..
@@ -135,15 +152,23 @@ cd ..
 
 ### 2. Start the backend
 
+Windows PowerShell:
+
 ```powershell
-start.bat
+.\start.bat
 ```
 
-On first run, `start.bat` creates a local `.agent_secret_key` with a valid Fernet key when `AGENT_SECRET_KEY` is not set. It also sets `AGENT_COOKIE_SECURE=false` for local loopback HTTP and starts FastAPI at `http://127.0.0.1:8000`.
+Ubuntu / WSL:
+
+```bash
+./start.sh
+```
+
+Both launchers use the project virtualenv, install the runtime requirements if their import check fails, and create a local `.agent_secret_key` with a valid Fernet key when `AGENT_SECRET_KEY` is not set. For local loopback HTTP they default `AGENT_COOKIE_SECURE` to `false` and start FastAPI at `http://127.0.0.1:8000`. The Ubuntu launcher also accepts `AGENT_HOST` and `AGENT_PORT` overrides.
 
 ### 3. Start the frontend
 
-```powershell
+```text
 cd web
 npm run dev
 ```

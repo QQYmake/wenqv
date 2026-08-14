@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { resolveApiUrl } from "../api/client";
+import { parseExportFileResult } from "../api/download";
 import type { ExportFileResult, ToolTrace } from "../types";
 import { Icon } from "./Icon";
 
@@ -13,39 +13,12 @@ function formatPayload(value: unknown) {
   }
 }
 
-function exportFileResult(value: unknown): ExportFileResult | null {
-  let candidate = value;
-  if (typeof candidate === "string") {
-    try {
-      candidate = JSON.parse(candidate);
-    } catch {
-      return null;
-    }
-  }
-  if (!candidate || typeof candidate !== "object") return null;
-  const result = candidate as Record<string, unknown>;
-  const filename = typeof result.filename === "string" ? result.filename : "";
-  const downloadUrl = typeof result.download_url === "string" ? result.download_url : "";
-  const mimeType = typeof result.mime_type === "string" ? result.mime_type : "";
-  if (!filename || !mimeType || !/^\/api\/files\/[a-f0-9]{32}$/.test(downloadUrl)) return null;
-  return { filename, download_url: downloadUrl, mime_type: mimeType };
-}
-
-function ExportDownload({ result }: { result: unknown }) {
-  const file = exportFileResult(result);
+function ExportFileNotice({ result }: { result: unknown }) {
+  const file: ExportFileResult | null = parseExportFileResult(result);
   if (!file) return null;
   return (
-    <div className="trace-download" role="group" aria-label={`导出文件 ${file.filename}`}>
-      <span className="trace-download__name">{file.filename}</span>
-      <a
-        className="trace-download__button"
-        href={resolveApiUrl(file.download_url)}
-        download={file.filename}
-        aria-label={`下载 ${file.filename}`}
-      >
-        <Icon name="arrow-down" />
-        <span>下载</span>
-      </a>
+    <div className="trace-export" role="status" aria-label={`导出文件 ${file.filename}`}>
+      <span>{file.filename}</span>
     </div>
   );
 }
@@ -96,7 +69,7 @@ function TraceItem({ trace }: { trace: ToolTrace }) {
         </div>
       </details>
       {trace.name === "export_file" && trace.status === "success" && (
-        <ExportDownload result={trace.result} />
+        <ExportFileNotice result={trace.result} />
       )}
     </>
   );

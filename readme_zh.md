@@ -14,7 +14,7 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 - **按 workspace 隔离的状态。** `workspace_id` HttpOnly Cookie 让浏览器刷新后仍能访问同一组会话和已保存的模型配置。
 - **加密的模型设置。** 设置面板保存 `main` 和可选 `summary` 两个角色的配置，并用 Fernet 加密 API key；浏览器只能得到掩码后的 key。
 - **Skills 与工具。** 可信 Markdown Skills 可在 UI 中选择、通过 `@skill-name` 提及，或由工具管理。除 `calculator`、`load_skill`、`remove_skill` 外，每次运行都会获得限定 workspace 的 `read`、`write`、`edit`、`grep`、`find`、`ls` 文件工具。
-- **Markdown 文件导出。** `export_file` Tool 将 Markdown 转换为 `md`、`txt`、`docx` 或 `pdf`，保存到当前 workspace，并只返回不暴露真实路径的 `/api/files/{file_id}` 下载 URL。DOCX 使用 `python-docx`；PDF 使用独立 Markdown→HTML 模板和内置 LXGW WenKai Lite 字体 CSS，运行环境还必须提供 WeasyPrint 所需的原生文字渲染库。
+- **Markdown 文件导出。** `export_file` Tool 将 Markdown 转换为 `md`、`txt`、`docx` 或 `pdf`，保存到当前 workspace，并返回不暴露真实路径的 `file_id`、文件名、MIME type 与相对 `/api/files/{file_id}` 下载 URL。SSE 收到成功结果后，前端按 `tool_call_id` 自动触发一次浏览器下载，不需要额外点击。DOCX 使用 `python-docx`；PDF 使用独立 Markdown→HTML 模板和内置 LXGW WenKai Lite 字体 CSS，运行环境还必须提供 WeasyPrint 所需的原生文字渲染库。
 - **默认问渠工作流。** 目录式 `wenqu` Skill 会自动注入每个 conversation，并路由七个备课阶段；训练文件保存在浏览器 workspace 中，同一浏览器的其他 conversation 可经明确选择后续训。
 - **有界执行。** Agent 轮数、连续工具失败次数、工具超时、工具输出大小和上下文大小都可配置。
 - **低干扰聊天界面。** 助手回合只固定显示一行默认折叠的“思考中”；兼容端点返回纯文本摘要时可点击展开，工具轨迹仍单独可见。
@@ -88,7 +88,7 @@ description: Turn a broad goal into a small executable plan.
 | `grep` | 在未忽略的文本文件中搜索，支持 regex/literal、glob、大小写、上下文和数量限制。 |
 | `find` | 按 glob 查找未忽略文件，返回相对搜索目录的路径。 |
 | `ls` | 按字母列出单个目录，包含点文件，目录名带 `/`。 |
-| `export_file` | 将 Markdown 导出为 `md`、`txt`、`docx` 或 `pdf`，执行输入/输出大小限制，并返回文件名、MIME type 与下载 URL。 |
+| `export_file` | 将 Markdown 导出为 `md`、`txt`、`docx` 或 `pdf`，执行输入/输出大小限制，并返回 file ID、文件名、MIME type 与下载 URL。 |
 
 `grep` 与 `find` 遵循 Git-compatible `.gitignore` 规则且不会进入 `.git`；搜索和列表输出最多 50KB。若 OpenAI-compatible 端点明确拒绝图片输入，客户端会去掉图片重试一次，向模型说明视觉不可用，并为该模型客户端记住此限制。
 

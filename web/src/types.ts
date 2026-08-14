@@ -28,6 +28,7 @@ export interface ToolTrace {
 }
 
 export interface ExportFileResult {
+  file_id: string;
   filename: string;
   download_url: string;
   mime_type: string;

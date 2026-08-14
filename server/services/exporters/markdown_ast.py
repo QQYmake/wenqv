@@ -2,9 +2,129 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import re
 from typing import Any
+
+
+_TOP_LEVEL_LIST_ITEM = re.compile(
+    r"^[ ]{0,3}(?:(?:[-+*])(?:[ \t]+|$)|(?:\d{1,9}[.)])(?:[ \t]+|$))"
+)
+_ATX_HEADING = re.compile(r"^[ ]{0,3}#{1,6}(?:[ \t]+|$)")
+_BLOCKQUOTE = re.compile(r"^[ ]{0,3}>")
+_SETEXT_HEADING_UNDERLINE = re.compile(r"^[ ]{0,3}(?:=+|-+)[ \t]*$")
+_THEMATIC_BREAK = re.compile(
+    r"^[ ]{0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
+)
+_TABLE_DELIMITER = re.compile(
+    r"^[ ]{0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+\|?[ \t]*$"
+)
+_REFERENCE_DEFINITION = re.compile(r"^[ ]{0,3}\[[^\]]+\]:[ \t]*\S")
+_FENCE_OPENING = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _line_content(line: str) -> str:
+    return line.rstrip("\r\n")
+
+
+def _line_ending(line: str) -> str:
+    if line.endswith("\r\n"):
+        return "\r\n"
+    if line.endswith("\n"):
+        return "\n"
+    if line.endswith("\r"):
+        return "\r"
+    return ""
+
+
+def _fence_opening(line: str) -> tuple[str, int] | None:
+    match = _FENCE_OPENING.match(_line_content(line))
+    if match is None:
+        return None
+    marker = match.group(1)
+    # A backtick fence cannot have backticks in its info string. Matching that
+    # rule here prevents an inline-code-looking line from masking later input.
+    if marker[0] == "`" and "`" in match.group(2):
+        return None
+    return marker[0], len(marker)
+
+
+def _closes_fence(line: str, fence: tuple[str, int]) -> bool:
+    marker, minimum_length = fence
+    return bool(
+        re.match(
+            rf"^[ ]{{0,3}}{re.escape(marker)}{{{minimum_length},}}[ \t]*$",
+            _line_content(line),
+        )
+    )
+
+
+def _is_top_level_list_item(line: str) -> bool:
+    value = _line_content(line)
+    return not _THEMATIC_BREAK.match(value) and bool(_TOP_LEVEL_LIST_ITEM.match(value))
+
+
+def _is_table_start(lines: list[str], index: int) -> bool:
+    if "|" not in _line_content(lines[index]) or index + 1 >= len(lines):
+        return False
+    return bool(_TABLE_DELIMITER.match(_line_content(lines[index + 1])))
+
+
+def _starts_nonparagraph_block(lines: list[str], index: int) -> bool:
+    value = _line_content(lines[index])
+    if not value.strip() or value[:1].isspace():
+        return True
+    if _is_top_level_list_item(value):
+        return True
+    if (
+        _ATX_HEADING.match(value)
+        or _BLOCKQUOTE.match(value)
+        or _THEMATIC_BREAK.match(value)
+        or _fence_opening(value)
+        or _REFERENCE_DEFINITION.match(value)
+        or _is_table_start(lines, index)
+    ):
+        return True
+    # A Setext heading starts with ordinary text, so its underline must be
+    # considered before deciding that the first line begins a paragraph.
+    return index + 1 < len(lines) and bool(
+        _SETEXT_HEADING_UNDERLINE.match(_line_content(lines[index + 1]))
+    )
+
+
+def normalize_markdown_for_export(content: str) -> str:
+    """Add a missing paragraph break after a top-level list item.
+
+    Model output occasionally places an unindented sentence immediately after
+    a list item. CommonMark treats that sentence as a continuation of the
+    final ``<li>``. For document export, unindented text at this narrow
+    boundary means a new paragraph; list continuations must be explicitly
+    indented. Nested lists, indented content, and recognised block starts are
+    deliberately left untouched.
+    """
+
+    lines = content.splitlines(keepends=True)
+    if len(lines) < 2:
+        return content
+
+    normalized: list[str] = []
+    fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        if (
+            fence is None
+            and index > 0
+            and _is_top_level_list_item(lines[index - 1])
+            and not _starts_nonparagraph_block(lines, index)
+        ):
+            # Preserve the source's newline convention whenever it is known.
+            normalized.append(_line_ending(lines[index - 1]) or _line_ending(line) or "\n")
+        normalized.append(line)
+
+        if fence is None:
+            fence = _fence_opening(line)
+        elif _closes_fence(line, fence):
+            fence = None
+
+    return "".join(normalized)
 
 
 def markdown_parser() -> Any:
@@ -29,7 +149,13 @@ def markdown_parser() -> Any:
 
 
 def parse_markdown(content: str) -> list[Any]:
-    return list(markdown_parser().parse(content))
+    return list(markdown_parser().parse(normalize_markdown_for_export(content)))
+
+
+def render_markdown(content: str) -> str:
+    """Render Markdown through the same export normalization as token parsing."""
+
+    return markdown_parser().render(normalize_markdown_for_export(content))
 
 
 def token_attrs(token: Any) -> dict[str, str]:
@@ -166,6 +292,8 @@ __all__ = [
     "inline_plain_text",
     "markdown_parser",
     "markdown_to_plain_text",
+    "normalize_markdown_for_export",
     "parse_markdown",
+    "render_markdown",
     "token_attrs",
 ]
