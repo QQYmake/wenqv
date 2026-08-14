@@ -1,156 +1,106 @@
-%%{init: {"theme": "base", "themeVariables": {"fontSize": "13px", "fontFamily": "Segoe UI, Microsoft YaHei, sans-serif"}, "flowchart": {"nodeSpacing": 40, "rankSpacing": 55, "curve": "basis", "padding": 8}}}%%
-flowchart TD
-    %% ==================== 样式 ====================
-    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
-    classDef api fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
-    classDef core fill:#fef9c3,stroke:#ca8a04,stroke-width:1.5px,color:#713f12
-    classDef adapter fill:#f3e8ff,stroke:#9333ea,stroke-width:1.5px,color:#4c1d95
-    classDef port fill:#ffedd5,stroke:#ea580c,stroke-width:1.5px,color:#7c2d12,stroke-dasharray:6 4
-    classDef ext fill:#e5e7eb,stroke:#6b7280,stroke-width:1.5px,color:#111827
-
-    %% ==================== ① 前端 ====================
-    subgraph CLIENT["① React + Vite SPA — web/src"]
-        direction TB
-        App["App.tsx<br/>运行时状态枢纽"]
-        UI["组件<br/>Composer（每轮 reasoning_effort）<br/>MessageList（折叠“思考中”）· ExecutionTrace（edit diff）"]
-        APICLIENT["api/client.ts<br/>REST 请求 + fetch"]
-        SSE["api/sse.ts<br/>parseSSEStream 增量解析"]
-        LAKE["LakeBackground.tsx<br/>Three.js 湖面（懒加载）"]
+%% Source of truth: current source code and config, not the rendered preview.
+%% Reading order: browser/API -> AgentCore -> Skills, tools, LLM and state.
+%% Solid arrows are executable calls or authoritative data paths. Dashed arrows
+%% are Markdown instructions/runtime constraints, not network calls or services.
+%% Key locations: server/main.py, server/api/chat.py, server/agent/core.py,
+%% server/agent/skills.py, server/storage/*.py, skills/wenqu*/SKILL.md.
+%%{init: {"theme": "base", "flowchart": {"htmlLabels": true, "nodeSpacing": 34, "rankSpacing": 42}, "themeVariables": {"fontFamily": "Arial, Noto Sans CJK SC, sans-serif", "fontSize": "14px", "lineColor": "#536471"}}}%%
+flowchart TB
+    subgraph FE["Frontend boundary — web/"]
+        direction LR
+        UI["React SPA<br/><code>web/src/App.tsx</code> + components"] --> Client["HTTP/SSE client<br/><code>web/src/api/client.ts</code><br/><code>web/src/api/sse.ts</code>"]
     end
 
-    %% ==================== ② FastAPI 传输层 ====================
-    subgraph API["② FastAPI 传输层 — server/api + server/main"]
-        direction TB
-        MAIN["main.py<br/>懒加载组合根<br/>create_app / __getattr__"]
-        AUTH["AuthMiddleware<br/>cookie → X-Workspace-ID · 401 守卫"]
-        DEPS["dependencies.py<br/>get_workspace_id / get_services"]
-        CHAT["chat.py<br/>reasoning_effort 校验 · SSE 编码<br/>404/412/409 · 取消协调"]
-        SESSIONS["sessions.py<br/>workspace 作用域 CRUD"]
-        META["meta.py<br/>/api/bootstrap · /api/skills · /api/config"]
-        UCFG["user_config.py<br/>掩码读 · 加密写 · 连接探测"]
-        SVC["services.py<br/>APIServices · AgentAdapter · RunCoordinator"]
-        FILES["files.py<br/>GET /api/files/{file_id}<br/>opaque attachment download"]
+    subgraph API["FastAPI / API boundary — server/main.py, server/api/"]
+        direction LR
+        App["<code>create_app()</code><br/>composition, CORS, SPA static files"] --> Identity["<code>AuthMiddleware</code> + <code>get_workspace_id</code><br/>HttpOnly <code>workspace_id</code> cookie<br/>or validated header"]
+        Identity --> Chat["<code>chat.py</code><br/><code>POST /api/chat</code>, abort, SSE"]
+        Identity --> Routes["other API routes<br/><code>sessions.py</code>, <code>meta.py</code>,<br/><code>user_config.py</code>, <code>files.py</code>"]
+        Chat --> Runs["<code>RunCoordinator</code><br/>one active run / (workspace, session)<br/><i>process memory only</i>"]
+        Chat --> Adapter["<code>AgentAdapter</code> — <code>services.py</code><br/>normalizes Agent events for API transport"]
     end
 
-    %% ==================== ③ Agent Core ====================
-    subgraph CORE["③ 与 HTTP 无关的 Agent Core — server/agent"]
-        direction TB
-        ACORE["AgentCore._stream<br/>默认 Skill → 显式 Skill → 用户消息<br/>可取消 ReAct 循环"]
-        CTX["ContextManager.prepare<br/>token 预算 · summary 摘要 · 确定性截断"]
-        SKILL["SkillManager<br/>平铺 + 目录包扫描<br/>默认 / 显式注入 · @mention"]
-        REG["ToolRegistry + Tool<br/>校验 · 超时 · 结果截断"]
-        TOOLS["基础工具<br/>calculator · load_skill<br/>remove_skill（默认项受保护）"]
-        FILETOOLS["全局文件工具<br/>read · write · edit<br/>grep · find · ls"]
-        EXPORTTOOL["export_file Tool<br/>Markdown input -> export result"]
-        EXPORTER["DocumentExporter<br/>md / txt / docx / pdf<br/>limits + unique manifest"]
-        PORTS["端口 ports.py<br/>ClientResolver · ConversationStore<br/>WorkspaceResolver · LLMClient"]
+    subgraph AR["Framework-independent Agent Runtime — server/agent/"]
+        direction LR
+        Core["<code>AgentCore</code> — <code>core.py</code><br/>cancellable ReAct loop; persisted turns;<br/>tool loop and active-run map"]
+        Core --> Context["<code>ContextManager</code><br/>budget, summary, title"]
+        Core --> Registry["<code>ToolRegistry</code><br/>schema, validation, timeout"]
+        Core --> SkillMgr["<code>SkillManager</code><br/>scan, render, inject/remove context"]
+        Core --> StorePort["<code>ConversationStore</code> port<br/><code>AgentStoreAdapter</code>"]
     end
 
-    %% ==================== ④ 出站适配器 ====================
-    subgraph ADAPT["④ 出站适配器 — server/storage + llm_resolver + agent/llm.py"]
-        direction TB
-        SADAPTER["AgentStoreAdapter<br/>SQLite 记录 ↔ ChatMessage"]
-        SQLITE["SQLiteStore<br/>WAL · asyncio.to_thread · BEGIN IMMEDIATE"]
-        SCACHE["SideCache<br/>内存 TTL + 可选 Redis"]
-        UREPO["UserConfigRepository<br/>Fernet 加解密 · 掩码 · 合并默认"]
-        RESOLVER["LLMResolverAdapter<br/>每 workspace 解析 · LRU 客户端池"]
-        OAI["OpenAICompatClient<br/>顶层 reasoning_effort · 临时图片输入<br/>视觉拒绝后无图重试一次"]
-        WRES["IsolatedWorkspaceResolver<br/>per-workspace 文件根"]
+    subgraph SK["Skill Runtime — packaged Markdown assets, not Python services"]
+        direction LR
+        Catalogue["<code>skills/*.md</code> and <code>skills/*/SKILL.md</code><br/>resolved by <code>server.main:_resolve_skills_directory()</code>"]
+        Wenqu["<code>skills/wenqu/SKILL.md</code><br/>default/root: global routing and ownership instructions"]
+        Stages["<code>skills/wenqu-{intake,cocreate,draft,<br/>rehearsal,iterate,compare}/SKILL.md</code><br/>dynamically injected stage instructions"]
+        Student["<code>skills/wenqu-student/SKILL.md</code><br/>student persona for rehearsal"]
+        Catalogue --> Wenqu
+        Catalogue --> Stages
+        Stages -.->|rehearsal instruction| Student
+        Wenqu -.->|load_skill instruction| Stages
     end
 
-    %% ==================== ⑤ 外部 ====================
-    subgraph EXT["⑤ 外部 / 持久化"]
-        direction TB
-        DB[("SQLite 文件")]
-        REDIS[("Redis（可选）")]
-        REMOTE["OpenAI 兼容<br/>模型端点"]
-        SKILLFILES["Skill 指令<br/>skills/*.md<br/>skills/*/SKILL.md"]
-        WFILES["per-workspace 文件根<br/>&lt;root&gt;/&lt;workspace_id&gt;"]
-        EXPORTS["opaque export files<br/>&lt;workspace&gt;/.agent-exports"]
-        WENQU["问渠训练档案<br/>wenqu/sessions/&lt;training_id&gt;<br/>current.md + 阶段文件"]
+    subgraph EX["LLM / tool adapters and authoritative state"]
+        direction LR
+        Resolver["<code>LLMResolverAdapter</code><br/><code>server/llm_resolver.py</code><br/>workspace resolution + client pool"]
+        LLM["<code>OpenAICompatClient</code><br/><code>server/agent/llm.py</code>"]
+        Provider["OpenAI-compatible provider<br/>Chat Completions stream / complete"]
+        ConfigRepo["<code>UserConfigRepository</code><br/>Fernet-encrypted API keys"]
+        Sqlite[("<code>SQLiteStore</code><br/><code>data/agent.db</code> by default<br/><br/>workspaces; sessions; messages;<br/>session_skills; user_configs")]
+        Cache["<code>SideCache</code><br/>memory + optional Redis<br/><i>non-authoritative</i>"]
+        Tools["built-in tools<br/><code>calculator</code>; <code>read/write/edit/find/grep/ls</code>;<br/><code>export_file</code>; <code>load_skill/remove_skill</code>"]
+        Workspace["<code>IsolatedWorkspaceResolver</code><br/><code>&lt;workspace root&gt;/&lt;workspace_id&gt;/</code>"]
+        Files["workspace files<br/>file-tool reads/writes"]
+        Training["Wenqu training archive<br/><code>wenqu/sessions/&lt;training_id&gt;/</code><br/><code>current.md</code>, stage files, lesson v1/v2"]
+        Exporter["<code>DocumentExporter</code><br/><code>export_file</code> tool"]
+        Exports["download artifacts<br/><code>.agent-exports/&lt;opaque-id&gt;.{md,txt,docx,pdf}</code><br/>plus manifest"]
     end
 
-    %% ==================== 前端内部 ====================
-    App --> APICLIENT
-    APICLIENT --> SSE
-    App --> UI
-    App -.-> LAKE
+    %% Browser request/response path. /api/chat warms the resolver before Core.
+    Client -->|cookie credentials; HTTP API| App
+    Adapter -->|stream| Core
+    Chat -.->|SSE AgentEvent| Client
 
-    %% ==================== 身份 / 配置链路 ====================
-    APICLIENT -->|"GET /api/bootstrap"| META
-    META -->|"Set-Cookie workspace_id"| APICLIENT
-    APICLIENT -->|"所有 API 请求"| AUTH
-    AUTH --> DEPS
-    DEPS --> CHAT & SESSIONS & META & UCFG & FILES
-    APICLIENT -->|"PUT /api/user/config"| UCFG
-    UCFG -->|"掩码读 / 加密写"| UREPO
-    UCFG -->|"warm() 失效缓存"| RESOLVER
+    %% LLM path: Core requests main; Context requests summary/title.
+    Core -->|main model messages + tool schemas| Resolver
+    Context -->|summary / title model| Resolver
+    Resolver --> LLM --> Provider
+    Provider -->|stream chunks / completion| Core
+    Resolver --> ConfigRepo --> Sqlite
+    Sqlite -.->|cached reads| Cache
 
-    %% ==================== 聊天 / 取消链路 ====================
-    UI -->|"选择 low / medium / high / max"| App
-    APICLIENT -->|"POST /api/chat<br/>reasoning_effort + SSE"| CHAT
-    CHAT --> SVC
-    SVC -->|"AgentAdapter.stream"| ACORE
-    CHAT -.->|"text / reasoning / tool + edit patch SSE"| APICLIENT
-    APICLIENT -->|"POST /api/chat/abort"| CHAT
-    APICLIENT -->|"GET /api/files/{file_id}"| FILES
-    SVC -->|"RunCoordinator.request_abort"| ACORE
+    %% Agent persistence and API-owned SQLite operations.
+    StorePort -->|conversation messages and session skills| Sqlite
+    Routes -->|session / config / metadata records| Sqlite
 
-    %% ==================== Agent Core 内部 ====================
-    ACORE -->|"prepare_context 每轮"| CTX
-    ACORE -->|"default_skills 每 conversation 一次<br/>再注入选择项"| SKILL
-    ACORE -->|"tools.execute"| REG
-    REG --> TOOLS & FILETOOLS & EXPORTTOOL
-    EXPORTTOOL -->|"Markdown -> format conversion"| EXPORTER
-    ACORE --> PORTS
-    CTX -->|"get_client('summary')"| PORTS
-    ACORE -->|"get_client('main')<br/>同一运行继承所选强度"| PORTS
-    TOOLS -->|"load_skill / remove_skill"| SKILL
-    FILETOOLS -->|"安全解析 · 读写 · 搜索"| WFILES
-    FILETOOLS -->|"owner 校验 · 显式续训转移"| WENQU
-    FILETOOLS -.->|"图片仅当前 run 临时附加"| ACORE
-    SKILLFILES -->|"scan"| SKILL
+    %% Tools remain in-process and every filesystem path is workspace-confined.
+    Registry -->|execute| Tools
+    Tools -->|file tools| Workspace --> Files
+    Tools -->|export_file| Exporter --> Exports
+    Routes -->|file download resolution| Exporter
+    Exporter --> Workspace
+    Tools -->|load_skill / remove_skill| SkillMgr
+    SkillMgr -->|scan + render| Catalogue
 
-    %% ==================== 六边形边界：端口实现 ====================
-    PORTS -.->|"实现 ClientResolver"| RESOLVER
-    PORTS -.->|"实现 ConversationStore"| SADAPTER
-    PORTS -.->|"实现 WorkspaceResolver"| WRES
-    PORTS -.->|"实现 LLMClient"| OAI
+    %% Wenqu is the Core-specific runtime-context special case. All following
+    %% state transitions are instructions driving normal tool calls, not Python code.
+    Core -.->|default wenqu gets conversation_id + workspace_data_root| Wenqu
+    Wenqu -.->|owner checks and instruction-directed writes| Training
+    Training --- Files
 
-    %% ==================== 持久化链路 ====================
-    SADAPTER -->|"回答 + reasoning/effort + edit patch 元数据"| SQLITE
-    SKILL -->|"inject_skill 去重持久化"| SADAPTER
-    SQLITE --> DB
-    SQLITE --> SCACHE
-    SCACHE --> REDIS
-    SESSIONS --> SQLITE
-    CHAT --> SQLITE
-    UREPO --> SQLITE
+    classDef frontend fill:#E8F2FF,stroke:#2F6B9A,color:#12324A,stroke-width:1.5px;
+    classDef api fill:#EEF7F0,stroke:#3B7A57,color:#173D28,stroke-width:1.5px;
+    classDef agent fill:#F2EDFF,stroke:#7056A3,color:#321E5A,stroke-width:1.5px;
+    classDef skill fill:#FFF6DF,stroke:#A46A10,color:#503400,stroke-width:1.5px;
+    classDef adapter fill:#FDEEF1,stroke:#A04A63,color:#57192A,stroke-width:1.5px;
+    classDef state fill:#EAF7F7,stroke:#287C80,color:#134044,stroke-width:1.5px;
+    classDef external fill:#F4F5F7,stroke:#59636E,color:#20262D,stroke-width:1.5px;
 
-    %% ==================== 出站 ====================
-    RESOLVER -->|"读取加密配置 + 合并默认"| UREPO
-    RESOLVER -->|"构建 / 池化客户端"| OAI
-    OAI -->|"Chat Completions stream / complete"| REMOTE
-    WRES --> WFILES
-    FILES -->|"workspace resolver + opaque id"| EXPORTER
-    EXPORTER -->|"FileResponse + Content-Disposition"| FILES
-    EXPORTER --> EXPORTS
-    WFILES --> WENQU
-    SESSIONS -.->|"删除 conversation<br/>不删除训练档案"| WENQU
-
-    %% ==================== 组合根 ====================
-    MAIN -.->|"装配 APIServices"| SVC
-    MAIN -.->|"构建 store + SideCache"| SQLITE
-    MAIN -.->|"构建 ClientResolver"| RESOLVER
-    MAIN -.->|"启动 DocumentExporter + workspace resolver"| EXPORTER
-    MAIN -.->|"配置 default_skills<br/>懒加载组合 AgentCore"| ACORE
-
-    %% ==================== 图例 ====================
-    subgraph LEGEND["图例"]
-        L1["前端"]:::client
-        L2["FastAPI 传输层"]:::api
-        L3["Agent Core"]:::core
-        L4["出站适配器"]:::adapter
-        L5["端口（抽象）"]:::port
-        L6["外部 / 持久化"]:::ext
-    end
+    class UI,Client frontend;
+    class App,Identity,Chat,Routes,Runs,Adapter api;
+    class Core,Context,Registry,SkillMgr,StorePort agent;
+    class Catalogue,Wenqu,Stages,Student skill;
+    class Resolver,LLM,ConfigRepo,Exporter adapter;
+    class Sqlite,Cache,Workspace,Files,Training,Exports state;
+    class Provider,Tools external;

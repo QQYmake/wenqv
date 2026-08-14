@@ -1,238 +1,105 @@
 # Blue Lake Agent
 
-[中文说明](readme_zh.md) · [Architecture source](docs/architecture.mmd) · [Deployment guide](deploy/DEPLOY.md)
+## Project Overview
 
-Blue Lake Agent is a self-hosted, single-process chat application for an LLM that can use tools. It combines a React/Vite SPA with a FastAPI backend, a framework-independent ReAct Agent core, SQLite persistence, file-based Skills, and OpenAI-compatible model endpoints.
+一个单进程、workspace 隔离的 Agent 对话代码库。前端是 React/Vite，后端是 FastAPI/Uvicorn；核心执行层是与 HTTP、SQLite 解耦的 Python Agent Runtime，通过 Tool Registry、Markdown Skills 和 OpenAI-compatible LLM adapter 运行。
 
-It is designed for a trusted private environment: each browser receives a stable workspace identity, and each workspace can save its own encrypted model configuration. It is not an internet-facing multi-tenant authentication system.
+当前默认/root Skill 是 `wenqu`。它是 Agent 上下文中的 Markdown 指令包，负责指导模型组织备课训练和文件状态；它不是独立后端服务，也不是 Python workflow engine。
 
-## What it provides
-
-- **Per-turn reasoning effort.** The composer exposes `low`, `medium`, `high`, and `max`; the last choice is remembered locally and sent to every `main` call in that ReAct run.
-- **Streaming Agent chat.** A cancellable ReAct loop streams typed SSE events for text, optional reasoning summaries, tool calls, tool results, errors, and completion.
-- **Persistent conversations.** Create, restore, rename, and delete sessions; messages, tool traces, and loaded Skills are stored in SQLite.
-- **Workspace-scoped state.** A `workspace_id` HttpOnly cookie keeps a browser's sessions and saved model configuration stable across reloads.
-- **Encrypted provider settings.** The Settings panel saves `main` and optional `summary` provider details with Fernet encryption; API keys are only returned to the browser in masked form.
-- **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. Alongside `calculator`, `load_skill`, and `remove_skill`, every run receives workspace-confined `read`, `write`, `edit`, `grep`, `find`, and `ls` file tools.
-- **Markdown document export.** The `export_file` Tool converts Markdown into `md`, `txt`, `docx`, or `pdf`, stores the result under the active workspace, and returns an opaque `file_id`, filename, MIME type, and relative `/api/files/{file_id}` download URL. A successful SSE tool result triggers one browser download per `tool_call_id`; no extra download click is required. DOCX uses `python-docx`; PDF uses a Markdown-to-HTML template with the bundled LXGW WenKai Lite font CSS and requires WeasyPrint's native text-rendering libraries at runtime.
-- **Default Wenqu workflow.** The packaged `wenqu` Skill is injected once into every conversation and routes its seven coaching stages. Training files live under the browser workspace, so another conversation in the same browser can explicitly resume them.
-- **Bounded execution.** Agent turns, consecutive tool failures, tool timeouts, tool-output size, and context size are configurable limits.
-- **Responsive chat UI.** The frontend shows a compact, collapsed `Thinking` row instead of exposing reasoning inline; compatible plaintext summaries can be expanded, while tool traces remain separate.
-- **Durable local storage.** SQLite is the source of truth. Redis is optional and used only as a best-effort side cache; an in-memory TTL cache is always available.
+主要技术：Python 3.11+、FastAPI、SQLite、OpenAI Python SDK、React 18、TypeScript、Vite、Vitest；文档导出使用 `python-docx` 与 WeasyPrint。
 
 ## Architecture
 
-![Blue Lake Agent architecture](docs/architecture.png)
+先读 [docs/architecture.mmd](docs/architecture.mmd)。这是面向 Coding Agent 的架构压缩表达、源码导航和事实入口；修改架构相关代码时，应先以它定位模块，再回到对应源码验证。PNG/SVG 仅是同一源图的人工视觉预览： [SVG](docs/architecture.svg) · [PNG](docs/architecture.png)。
 
-The diagram above is generated from [`docs/architecture.mmd`](docs/architecture.mmd). The code is organized into five boundaries:
+![项目架构预览](docs/architecture.png)
 
-| Boundary | Main location | Responsibility |
+阅读图时把握四个边界：
+
+- `web/` 只通过 cookie 携带凭据的 HTTP 与 SSE 调用 `/api`；它不直接访问 Agent、SQLite 或 workspace 文件。
+- `server/api/` 负责身份/workspace 边界、HTTP 校验、SSE 传输和 API 服务编排；`server/agent/` 不导入 FastAPI 或 storage 实现。
+- `AgentCore` 依赖 ConversationStore、LLM client resolver 和 workspace resolver 等端口。Tool Runtime 与 Skill Runtime 都在同一 Agent 进程内。
+- `wenqu` 和 `wenqu-*` 都是 Skill Runtime 扫描的 Markdown 文件。`wenqu` 为默认/root 上下文；阶段 Skills 由现有 `load_skill` 机制动态注入会话，绝不是独立服务。
+
+## Core Runtime Flow
+
+1. `web/src/App.tsx` 首先调用 `GET /api/bootstrap` 获取/刷新 HttpOnly `workspace_id` cookie；随后通过 `web/src/api/client.ts` 管理 session、设置和 Skill 目录。
+2. `POST /api/chat` 在 `server/api/chat.py` 验证 session 与 workspace，预热该 workspace 的 LLM 配置，使用 `RunCoordinator` 防止同一 `(workspace, session)` 并发执行，然后经 `AgentAdapter` 调用 `AgentCore.stream()`。
+3. `AgentCore` 注入默认 Skill、UI 选中的 Skill 和消息中的 `@skill` 提及（去重且持久化为会话上下文），保存用户消息，并由 `ContextManager` 在超出预算时生成/持久化上下文摘要。
+4. 主模型经 `LLMResolverAdapter` 按 workspace 选出 `OpenAICompatClient`，以流式 Chat Completions 接收文本、reasoning 和 tool-call delta。`ToolRegistry` 校验并执行工具；`load_skill`/`remove_skill` 变更后续会话上下文，文件工具限定在当前 workspace 内。
+5. `AgentCore` 持久化 assistant/tool 消息并产生 `AgentEvent`；`chat.py` 编码为 SSE，前端增量更新文本、reasoning、工具轨迹和 Skill 通知。首条消息的标题生成在终止事件送达后尽力执行，并使用 summary model 与 2 秒上限。
+
+`wenqu` 有一个明确的代码级特例：当它作为默认 Skill 注入时，`server/agent/core.py` 追加 `conversation_id` 和 `workspace_data_root: "wenqu/sessions"`。之后的训练路由、阶段切换和落盘由 `SKILL.md` 指令引导模型调用现有文件工具完成；服务端没有对应的 Wenqu Python 状态机。
+
+## Codebase Map
+
+| 区域 | 先看哪里 | 负责内容 / 何时修改 |
 | --- | --- | --- |
-| SPA | `web/src` | UI state, REST calls, `fetch()`-based SSE parsing, settings, and presentation |
-| API / composition | `server/main.py`, `server/api` | FastAPI routes, workspace middleware, SSE transport, session CRUD, run coordination |
-| Agent Core | `server/agent` | HTTP-independent ReAct loop, context preparation, Skills, tools, and typed events |
-| Adapters | `server/storage`, `server/llm_resolver.py`, `server/agent/llm.py` | SQLite, cache, encrypted user config, workspace files, OpenAI-compatible client |
-| External state | `data/`, `skills/`, model endpoint, optional Redis | Persistent data, trusted instructions, models, and optional cache |
+| 前端壳与对话状态 | `web/src/App.tsx`, `web/src/components/` | 修改会话 UI、流式事件展示、Skill 选择、设置入口或下载交互。 |
+| 前端网络层 | `web/src/api/client.ts`, `web/src/api/sse.ts`, `web/src/types.ts` | 修改 REST/SSE 协议、cookie 凭据、事件解析或浏览器类型。 |
+| 应用组合与配置 | `server/main.py`, `server/config.py`, `server/llm_resolver.py` | 修改依赖装配、环境覆盖、静态 SPA、LLM 解析/池化或启动安全策略。 |
+| FastAPI API | `server/api/chat.py`, `services.py`, `sessions.py`, `files.py`, `meta.py`, `user_config.py`, `middleware/auth.py` | 修改 HTTP 端点、SSE、Agent transport adapter、workspace 身份、会话/文件/配置 API。 |
+| Agent Core | `server/agent/core.py`, `context.py`, `models.py`, `ports.py` | 修改 turn loop、取消、上下文压缩、事件模型或端口契约；保持该目录与 FastAPI/storage 实现解耦。 |
+| Tool Runtime | `server/agent/registry.py`, `server/agent/tools/` | 新增工具、修改 JSON Schema/超时/结果截断，或调整 workspace 受限文件操作、导出工具。 |
+| Skill Runtime | `server/agent/skills.py`, `server/agent/tools/skill_tools.py`, `skills/` | 修改 Skill 扫描、注入、`load_skill`/`remove_skill` 或 Markdown 指令包。 |
+| Wenqu Skills | `skills/wenqu/SKILL.md`; `skills/wenqu-{intake,cocreate,draft,rehearsal,iterate,compare}/SKILL.md`; `skills/wenqu-student/SKILL.md` | `wenqu` 定义 root 路由、运行时所有权和 `wenqu/sessions` 协议；阶段包按需动态加载，`wenqu-student` 仅由 rehearsal 指令在试讲中加载。 |
+| SQLite 与适配器 | `server/storage/sqlite.py`, `agent_adapter.py`, `user_configs.py`, `cache.py` | 修改持久化 schema、会话消息/Skill 激活、加密 LLM 配置或可选缓存；SQLite 始终是事实源。 |
+| Workspace 与导出 | `server/storage/workspace.py`, `server/services/document_exporter.py`, `server/services/exporters/` | 修改 workspace 路径隔离、下载 manifest 或 Markdown → md/txt/docx/pdf 转换。 |
+| 测试、文档和部署 | `tests/unit/`, `tests/integration/`, `docs/`, `deploy/DEPLOY.md` | 为边界行为补测试；架构修改同步更新 `.mmd` 和预览；生产部署细节见部署文档。 |
 
-The important dependency rule is: **the Agent Core depends on ports, not FastAPI, SQLite, or the OpenAI SDK.** `server/main.py` is the composition root that supplies the actual adapters.
+## State / Storage / Configuration
 
-### Request lifecycle
+| 状态 | 事实源与位置 | 生命周期 / 边界 |
+| --- | --- | --- |
+| workspace identity | `workspace_id` HttpOnly cookie；无 cookie 时 `GET /api/bootstrap` 创建；非浏览器客户端可使用受校验的 `X-Workspace-ID` | 一个 workspace 可有多个 session。cookie 在有效时优先于 header；前端 `localStorage` 只保留非敏感 UI 镜像，不是服务端身份事实源。 |
+| 会话与 Agent context | SQLite 的 `workspaces`、`sessions`、`messages`、`session_skills` | `sessions` 是代码/API 中的 conversation。消息、tool calls/results、已注入 Skill 和上下文摘要都在 SQLite；删除 session 级联删除这些记录。 |
+| LLM 用户配置 | SQLite `user_configs`，由 `UserConfigRepository` 写入 | 每 workspace 一份。API key 以 `AGENT_SECRET_KEY` 对应的 Fernet key 加密，API 只返回掩码；解析后的 main 配置不完整时 chat 返回 412。summary 缺省时回退到 main。 |
+| 运行中状态与缓存 | `RunCoordinator`、`AgentCore._active`、LLM resolver cache/client pool、`SideCache` | 都在进程内，重启丢失。Redis 仅是可选 side cache，不能当作持久化或一致性依据。 |
+| 一般 workspace 文件 | `<workspace.root>/<workspace_id>/`，由 `IsolatedWorkspaceResolver` 懒创建 | `read/write/edit/find/grep/ls` 均使用受限路径解析；不能越出当前 workspace。开发默认 `workspace.root: .`，生产应通过 `AGENT_WORKSPACE_ROOT` 放到可写数据目录。 |
+| 导出文件 | `<workspace>/.agent-exports/` | `DocumentExporter` 保存随机 opaque file ID、文件和 JSON manifest；`GET /api/files/{file_id}` 仅在当前 workspace 内解析。 |
+| Wenqu training state | `<workspace>/wenqu/sessions/<training_id>/` | `current.md`、阶段记录和 lesson v1/v2 是训练状态事实源。其 `owner_conversation_id` 使用上面的 session ID；删除应用 session 不会删除 training 文件。 |
+| 服务与安全配置 | `config.yaml` 加 `AGENT_*` 环境变量 | `AGENT_CONFIG` 决定配置文件；`AGENT_SQLITE_PATH`、`AGENT_WORKSPACE_ROOT`、`AGENT_STATIC_DIR` 是主要运行时路径。当前 `llm.require_user_config: true` 时缺失或非法 `AGENT_SECRET_KEY` 会在启动时失败；`AGENT_COOKIE_SECURE` 控制身份 cookie。前端可选 `VITE_API_BASE_URL` 改变 API 基址。 |
+| 可信 Skill 目录查找 | `server/main.py:_resolve_skills_directory()` | 当前组合代码依次查找 `<config dir>/skills`、`<workspace root>/skills`、仓库 `skills/`。虽然 `AGENT_SKILLS_ROOT` 会被解析到配置对象，当前查找函数并未把它作为输入。 |
 
-1. The SPA calls `GET /api/bootstrap`; the server reuses or creates an HttpOnly `workspace_id` cookie.
-2. The SPA loads sessions, Skills, public limits, and masked user configuration. Private API requests are then scoped to that workspace by `AuthMiddleware`.
-3. A message and its `reasoning_effort` go to `POST /api/chat`. The API accepts exactly `low`, `medium`, `high`, or `max`, allows one active run per workspace/session, then opens an SSE stream.
-4. `AgentCore` injects configured default Skills before the user message, once per conversation, then adds explicitly selected or mentioned Skills. It applies the reasoning effort unchanged to every `main` model call in the run; the separate `summary` role does not inherit it.
-5. Text, best-effort plaintext reasoning summaries, and tool events flow back as typed SSE. The assistant answer and reasoning metadata are persisted under one request id so history restores as one turn.
+不要混淆两类状态：Wenqu 的 `current.md` 等 training 文件由模型按 Skill 指令通过工具读写，独立于普通 conversation persistence；后者由 AgentStoreAdapter 映射到 SQLite。只有默认 `wenqu` 注入获得的 `conversation_id`/`workspace_data_root` 把它们关联起来。
 
-### Context and model roles
+## Development / Agent Guide
 
-- `main` is required for chat. It is the model used for streaming responses and tool calls.
-- `summary` is optional. It is used for context compression and first-message titles when its configuration is complete. If it fails or is unavailable, chat remains available: title generation falls back to the first prompt and context compression falls back to deterministic trimming.
-- `reasoning_effort` is sent as a top-level Chat Completions parameter with no model-specific remapping or silent fallback. Unsupported model/effort pairs surface through the normal error path.
-- Chat Completions has no official reasoning-summary contract. The adapter only forwards direct plaintext from compatible gateway fields (`reasoning_content`, `reasoning`, or `thinking`) and ignores structured/opaque payloads.
-- `ContextManager` estimates mixed Chinese/English tokens, preserves recent messages and Skill injections, and keeps an assistant tool call with its tool replies as one atomic group.
-
-### Skills and tool safety
-
-Skills are loaded from the repository's [`skills/`](skills/) catalogue. The preferred package layout is `skills/<name>/SKILL.md`; legacy flat `skills/<name>.md` files remain supported. A package directory must match its front-matter `name`, which prevents ambiguous discovery. Every Skill must include front matter:
-
-```markdown
----
-name: concise_plan
-description: Turn a broad goal into a small executable plan.
----
-
-Trusted instructions for the model go here.
-```
-
-Loaded Skills are persisted and deduplicated per conversation. `agent.default_skills` (or `AGENT_DEFAULT_SKILLS`) loads trusted root Skills automatically; default Skills are protected from `remove_skill`. Every file tool accepts relative or absolute paths but resolves them inside the active browser workspace root, including symlink checks. This is an application-level guard, not an operating-system sandbox.
-
-The checked-in default is `wenqu`, adapted as one root package plus seven stage packages without a duplicate `README.md` or `AGENT.md`. Its runtime state is separate from the installed Skill text:
-
-```text
-<workspace root>/<workspace_id>/wenqu/sessions/<training_id>/
-  current.md
-  stage_v1.md
-  lesson-v1.md
-  stage_v2.md
-  lesson-v2.md
-```
-
-`current.md.owner_conversation_id` gives one application conversation write ownership at a time. A resume request always lists every historical training, even when there is only one candidate, and transfers ownership only after the user selects it. Deleting a conversation removes its SQLite history but intentionally preserves these workspace training files. Different browser workspaces remain isolated.
-
-| Tool | Main behavior |
-| --- | --- |
-| `read` | Reads text from a 1-based `offset`, capped at 2,000 lines / 50KB. JPG, PNG, GIF, WebP, and BMP files are resized to a 1,568px longest edge and attached only to the active model run. |
-| `write` | Atomically creates or replaces a UTF-8 file and creates missing parent directories. |
-| `edit` | Atomically applies unique, non-overlapping replacements matched against the original file; its unified diff is shown in the execution trace. |
-| `grep` | Searches non-ignored text files with regex/literal, glob, case, context, and result-limit controls. |
-| `find` | Finds non-ignored files by glob and returns paths relative to the search directory. |
-| `ls` | Lists one directory alphabetically, including dotfiles, with `/` suffixes for directories. |
-| `export_file` | Converts Markdown to `md`, `txt`, `docx`, or `pdf`, enforces input/output limits, and returns a file ID, filename, MIME type, and opaque download URL. |
-
-`grep` and `find` follow Git-compatible `.gitignore` rules and never enter `.git`. Search/list output is capped at 50KB. If an OpenAI-compatible endpoint explicitly rejects image input, the client retries once without image data, tells the model that vision is unavailable, and remembers that limitation for that model client.
-
-## Repository map
-
-```text
-server/
-  api/                 FastAPI routes, request schemas, middleware, service adapters
-  agent/               ReAct core, ports, context manager, Skills, tools, LLM adapter
-  services/            Markdown parsing and md/txt/docx/pdf export implementations
-  storage/             SQLite, cache, encrypted configuration, workspace resolver
-  main.py              Lazy composition root and optional SPA hosting
-web/
-  src/                 React application, API client/SSE parser, components, visual scene
-  public/fonts/        Bundled LXGW WenKai Lite font and its license information
-skills/                Trusted flat and packaged Skill catalogue; Wenqu workflow
-tests/                 Python unit/integration tests
-deploy/                Ubuntu + nginx + systemd deployment templates and guide
-start.bat / start.sh   Windows / Ubuntu development launchers
-docs/architecture.mmd  Canonical Mermaid architecture diagram
-```
-
-## Quick start (local development)
-
-### Prerequisites
-
-- Python 3.11+
-- A current Node.js version compatible with Vite 8
-- An OpenAI Chat Completions-compatible endpoint that supports streamed tool calls
-- Redis only if you want the optional shared side cache
-
-`requirements.txt` includes the Markdown, DOCX, and WeasyPrint conversion libraries. PDF export also needs the native text-rendering libraries required by WeasyPrint on the deployment OS; the Python package alone is not sufficient on every platform.
-
-### 1. Install dependencies
-
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-dev.txt
-```
-
-Ubuntu / WSL:
+首次本地准备：
 
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip
-
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
-```
 
-On either platform, install the frontend dependencies:
-
-```text
 cd web
 npm ci
-cd ..
 ```
 
-### 2. Start the backend
-
-Windows PowerShell:
-
-```powershell
-.\start.bat
-```
-
-Ubuntu / WSL:
+本地开发使用两个终端：
 
 ```bash
+# terminal 1, repository root
 ./start.sh
-```
 
-Both launchers use the project virtualenv, install the runtime requirements if their import check fails, and create a local `.agent_secret_key` with a valid Fernet key when `AGENT_SECRET_KEY` is not set. For local loopback HTTP they default `AGENT_COOKIE_SECURE` to `false` and start FastAPI at `http://127.0.0.1:8000`. The Ubuntu launcher also accepts `AGENT_HOST` and `AGENT_PORT` overrides.
-
-### 3. Start the frontend
-
-```text
+# terminal 2
 cd web
 npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Vite proxies `/api` to FastAPI on port 8000.
+`start.sh` 会为本地环境创建或复用 `.agent_secret_key`，并设定 `AGENT_COOKIE_SECURE=false`；前端开发服务器通过 `web/vite.config.ts` 将 `/api` 代理到 `127.0.0.1:8000`。当前默认配置要求每个 workspace 在 Settings 中提供可用的 main LLM 配置。
 
-### 4. Configure a model
+验证命令：
 
-Open **Settings** and fill in `main` `base_url`, `api_key`, and `model`. Use **Test** before **Save**. A `summary` configuration can be added separately; it is not required to start chatting.
+```bash
+# repository root
+.venv/bin/python -m pytest
 
-## Configuration
-
-[`config.yaml`](config.yaml) contains the defaults. All relative paths resolve from the selected config file, and environment variables take precedence.
-
-| Concern | Primary configuration |
-| --- | --- |
-| Config file | `AGENT_CONFIG` |
-| Secret and identity | `AGENT_SECRET_KEY`, `AGENT_REQUIRE_USER_CONFIG`, `AGENT_COOKIE_SECURE` |
-| Main / summary provider | `AGENT_MAIN_*`, `AGENT_SUMMARY_*` (`API_KEY`, `BASE_URL`, `MODEL`, `MAX_TOKENS`, `TIMEOUT_S`, `TEMPERATURE`) |
-| Agent / context limits | `AGENT_MAX_TURNS`, `AGENT_MAX_TOOL_RETRIES`, `AGENT_TOOL_TIMEOUT_S`, `AGENT_TOOL_RESULT_MAX_CHARS`, `AGENT_DEFAULT_SKILLS`, `AGENT_TOKEN_BUDGET`, `AGENT_SUMMARY_TRIGGER_RATIO`, `AGENT_PRESERVE_RECENT_MESSAGES` |
-| Storage and cache | `AGENT_SQLITE_PATH`, `REDIS_URL`, `AGENT_CACHE_TTL_S` |
-| Server and SPA | `AGENT_HOST`, `AGENT_PORT`, `AGENT_CORS_ORIGINS`, `AGENT_STATIC_DIR` |
-| Workspace | `AGENT_WORKSPACE_ID`, `AGENT_WORKSPACE_NAME`, `AGENT_WORKSPACE_ROOT`, `AGENT_SKILLS_ROOT` |
-| Frontend API origin | `VITE_API_BASE_URL` |
-
-The checked-in `config.yaml` sets `llm.require_user_config: true`. In that mode, the server deliberately refuses to start without a valid `AGENT_SECRET_KEY`, so saved API keys are never silently made unrecoverable.
-
-## API surface
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/bootstrap` | Create or reuse browser workspace identity |
-| `GET /api/sessions`, `POST /api/sessions` | List and create workspace sessions |
-| `PATCH` / `DELETE /api/sessions/{id}` | Rename or delete a session |
-| `GET /api/sessions/{id}/messages` | Restore stored message history |
-| `GET /api/skills`, `GET /api/config` | Discover Skills and browser-safe runtime information |
-| `GET` / `PUT /api/user/config` | Read masked and write encrypted model settings |
-| `POST /api/user/config/test` | Probe submitted provider roles without saving them |
-| `POST /api/chat` | Start SSE chat; body includes `reasoning_effort` (`low` / `medium` / `high` / `max`, default `medium`) |
-| `POST /api/chat/abort` | Request cooperative cancellation of an active run |
-| `GET /api/files/{file_id}` | Download a workspace-scoped exported file with its stored MIME type and filename |
-| `GET /api/health` | Health check |
-
-When `web/dist` exists, FastAPI can serve the built SPA and fall back to `index.html` for client routes. Missing `/api/*` routes remain JSON 404 responses rather than becoming the SPA HTML shell.
-
-## Verification
-
-```powershell
-python -m pytest
-
+# frontend
 cd web
 npm test
 npm run build
 ```
 
-The test suite uses fake LLMs and adapters, so it does not require an API key, a live model endpoint, or Redis.
+生产部署、Nginx、systemd、SQLite/workspace 外置和 PDF smoke test 见 [deploy/DEPLOY.md](deploy/DEPLOY.md)。
 
-## Deployment and security boundary
-
-For an Ubuntu deployment with nginx and systemd, start from [`deploy/DEPLOY.md`](deploy/DEPLOY.md). Build the SPA first, keep a fixed `AGENT_SECRET_KEY`, run the backend on loopback, and terminate TLS at nginx.
-
-Before exposing this project beyond a trusted private environment, add real authentication and authorization, TLS, request-size and rate limits, and stronger process/file-system isolation. In particular:
-
-- The `workspace_id` cookie and `X-Workspace-ID` scope data; they are **not** authentication or authorization.
-- `AGENT_SECRET_KEY` encrypts stored API keys. Rotating or losing it makes existing encrypted keys unreadable.
-- Text and images returned by `read`, plus the contents of trusted Skills, can be sent to the configured remote model endpoint. Image data is not persisted in SQLite or exposed through SSE. Keep secrets outside the workspace root and review Skills before enabling them.
-- CORS is a browser policy, not access control. Set `AGENT_COOKIE_SECURE=true` for HTTPS deployments.
+处理架构敏感改动时，顺序是：先读 [docs/architecture.mmd](docs/architecture.mmd)，再检查图中指向的实现与测试，最后更新并验证 `.mmd` 及预览。不要从 PNG/SVG 反推架构；它们只用于辅助查看。
