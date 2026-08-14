@@ -6,7 +6,16 @@ import { MessageList } from "./components/MessageList";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Welcome } from "./components/Welcome";
-import type { AgentEvent, ChatMessage, PublicConfig, Session, Skill, Theme, ToolTrace } from "./types";
+import type {
+  AgentEvent,
+  ChatMessage,
+  PublicConfig,
+  ReasoningEffort,
+  Session,
+  Skill,
+  Theme,
+  ToolTrace,
+} from "./types";
 
 const LakeBackground = lazy(() =>
   import("./scene/LakeBackground").then((module) => ({ default: module.LakeBackground })),
@@ -15,6 +24,7 @@ const LakeBackground = lazy(() =>
 const THEME_KEY = "blue-lake.theme";
 const SESSION_KEY = "blue-lake.active-session";
 const WORKSPACE_KEY = "blue-lake.workspace-id";
+const REASONING_EFFORT_KEY = "blue-lake.reasoning-effort";
 
 function uniqueId(prefix: string) {
   const uuid = globalThis.crypto?.randomUUID?.();
@@ -29,6 +39,20 @@ function initialTheme(): Theme {
     // Storage can be disabled; the OS preference remains a safe fallback.
   }
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function asReasoningEffort(value: unknown): ReasoningEffort | undefined {
+  return value === "low" || value === "medium" || value === "high" || value === "max"
+    ? value
+    : undefined;
+}
+
+function initialReasoningEffort(): ReasoningEffort {
+  try {
+    return asReasoningEffort(localStorage.getItem(REASONING_EFFORT_KEY)) ?? "medium";
+  } catch {
+    return "medium";
+  }
 }
 
 function parseMaybeJson(value: unknown): unknown {
@@ -52,6 +76,14 @@ function nestedAgentMetadata(message: ChatMessage): Record<string, unknown> {
 export function hydrateHistory(messages: ChatMessage[]): ChatMessage[] {
   const display: ChatMessage[] = [];
   const traceOwners = new Map<string, ChatMessage>();
+  const runOwners = new Map<string, ChatMessage>();
+
+  const mergeText = (current: string | undefined, next: string | undefined) => {
+    const part = next?.trim();
+    if (!part) return current ?? "";
+    if (!current?.trim()) return part;
+    return current.trim() === part ? current : `${current}\n\n${part}`;
+  };
 
   for (const message of messages) {
     const kind = message.kind?.toLocaleLowerCase() ?? "";
@@ -59,6 +91,14 @@ export function hydrateHistory(messages: ChatMessage[]): ChatMessage[] {
     const objectPayload =
       payload && typeof payload === "object" ? (payload as Record<string, unknown>) : undefined;
     const agentMetadata = nestedAgentMetadata(message);
+    const requestIdValue = metadataValue(message, "request_id");
+    const requestId =
+      typeof requestIdValue === "string" && requestIdValue.trim() ? requestIdValue : undefined;
+    const reasoningSummary =
+      typeof metadataValue(message, "reasoning_summary") === "string"
+        ? String(metadataValue(message, "reasoning_summary"))
+        : undefined;
+    const reasoningEffort = asReasoningEffort(metadataValue(message, "reasoning_effort"));
     const callId = String(
       metadataValue(message, "call_id") ??
         agentMetadata.tool_call_id ??
@@ -66,6 +106,28 @@ export function hydrateHistory(messages: ChatMessage[]): ChatMessage[] {
         objectPayload?.tool_call_id ??
         message.id,
     );
+    const attachReasoning = (target: ChatMessage) => {
+      target.reasoningEffort ??= reasoningEffort;
+      target.reasoningSummary = mergeText(target.reasoningSummary, reasoningSummary);
+    };
+    const ensureRunOwner = () => {
+      if (!requestId) return undefined;
+      let owner = runOwners.get(requestId);
+      if (!owner) {
+        owner = {
+          ...message,
+          role: "assistant",
+          content: "",
+          traces: [],
+          reasoningEffort,
+          reasoningSummary: "",
+        };
+        display.push(owner);
+        runOwners.set(requestId, owner);
+      }
+      attachReasoning(owner);
+      return owner;
+    };
 
     if (kind === "skill" || kind === "skill_injection" || kind === "skill_removed") {
       display.push(message);
@@ -100,13 +162,17 @@ export function hydrateHistory(messages: ChatMessage[]): ChatMessage[] {
                 status: "running",
               },
             ];
-      const traceMessage: ChatMessage = {
-        ...message,
-        role: "assistant",
-        content: "",
-        traces,
-      };
-      display.push(traceMessage);
+      const traceMessage =
+        ensureRunOwner() ??
+        ({
+          ...message,
+          role: "assistant",
+          content: "",
+          traces: [],
+        } satisfies ChatMessage);
+      traceMessage.content = mergeText(traceMessage.content, message.content);
+      traceMessage.traces = [...(traceMessage.traces ?? []), ...traces];
+      if (!requestId) display.push(traceMessage);
       traces.forEach((trace) => traceOwners.set(trace.callId, traceMessage));
       continue;
     }
@@ -122,11 +188,22 @@ export function hydrateHistory(messages: ChatMessage[]): ChatMessage[] {
                 result: objectPayload?.result ?? payload,
                 error,
                 truncated: Boolean(metadataValue(message, "truncated") ?? objectPayload?.truncated),
+                patch:
+                  typeof metadataValue(message, "ui_patch") === "string"
+                    ? String(metadataValue(message, "ui_patch"))
+                    : undefined,
+                patchTruncated: Boolean(metadataValue(message, "ui_patch_truncated")),
                 status: error ? "error" : "success",
               }
             : trace,
         );
       }
+      continue;
+    }
+
+    if (message.role === "assistant" && requestId) {
+      const owner = ensureRunOwner();
+      if (owner) owner.content = mergeText(owner.content, message.content);
       continue;
     }
 
@@ -143,6 +220,8 @@ interface AppProps {
 
 export function App({ client = api, renderWater = true }: AppProps) {
   const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [reasoningEffort, setReasoningEffort] =
+    useState<ReasoningEffort>(initialReasoningEffort);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -273,6 +352,14 @@ export function App({ client = api, renderWater = true }: AppProps) {
   }, [theme]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(REASONING_EFFORT_KEY, reasoningEffort);
+    } catch {
+      // The selected effort still applies to this tab when storage is unavailable.
+    }
+  }, [reasoningEffort]);
+
+  useEffect(() => {
     if (!activeSessionId) return;
     try {
       localStorage.setItem(SESSION_KEY, activeSessionId);
@@ -361,6 +448,12 @@ export function App({ client = api, renderWater = true }: AppProps) {
 
   const handleAgentEvent = (event: AgentEvent, assistantId: string) => {
     switch (event.type) {
+      case "reasoning_delta":
+        updateAssistant(assistantId, (message) => ({
+          ...message,
+          reasoningSummary: (message.reasoningSummary ?? "") + String(event.delta ?? ""),
+        }));
+        break;
       case "text_delta":
         updateAssistant(assistantId, (message) => ({
           ...message,
@@ -393,6 +486,8 @@ export function App({ client = api, renderWater = true }: AppProps) {
               result: event.result,
               error: Boolean(event.error),
               truncated: Boolean(event.truncated),
+              patch: typeof event.patch === "string" ? event.patch : undefined,
+              patchTruncated: Boolean(event.patch_truncated),
               status: event.error ? "error" : "success",
             } as ToolTrace;
           });
@@ -403,6 +498,8 @@ export function App({ client = api, renderWater = true }: AppProps) {
               result: event.result,
               error: Boolean(event.error),
               truncated: Boolean(event.truncated),
+              patch: typeof event.patch === "string" ? event.patch : undefined,
+              patchTruncated: Boolean(event.patch_truncated),
               status: event.error ? "error" : "success",
             });
           }
@@ -473,6 +570,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
         traces: [],
         skills: [],
         pending: true,
+        reasoningEffort,
       };
 
       setMessages((current) => [...current, userMessage, assistantMessage]);
@@ -489,6 +587,7 @@ export function App({ client = api, renderWater = true }: AppProps) {
           {
             session_id: sessionId,
             message: content,
+            reasoning_effort: reasoningEffort,
             ...(requestedSkills.length > 0 ? { skills: requestedSkills } : {}),
           },
           controller.signal,
@@ -599,10 +698,12 @@ export function App({ client = api, renderWater = true }: AppProps) {
               streaming={streaming}
               abortEnabled={config.features?.abort !== false}
               apiConfigured={apiConfigured}
+              reasoningEffort={reasoningEffort}
               onChange={setDraft}
               onSubmit={(value) => void sendMessage(value)}
               onAbort={stopCurrentStream}
               onOpenSettings={() => setSettingsOpen(true)}
+              onReasoningEffortChange={setReasoningEffort}
               onToggleSkill={(name, selected) =>
                 setSelectedSkills((current) => {
                   const next = new Set(current);

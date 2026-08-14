@@ -8,13 +8,15 @@ It is designed for a trusted private environment: each browser receives a stable
 
 ## What it provides
 
-- **Streaming Agent chat.** A cancellable ReAct loop streams typed SSE events for text, tool calls, tool results, errors, and completion.
+- **Per-turn reasoning effort.** The composer exposes `low`, `medium`, `high`, and `max`; the last choice is remembered locally and sent to every `main` call in that ReAct run.
+- **Streaming Agent chat.** A cancellable ReAct loop streams typed SSE events for text, optional reasoning summaries, tool calls, tool results, errors, and completion.
 - **Persistent conversations.** Create, restore, rename, and delete sessions; messages, tool traces, and loaded Skills are stored in SQLite.
 - **Workspace-scoped state.** A `workspace_id` HttpOnly cookie keeps a browser's sessions and saved model configuration stable across reloads.
 - **Encrypted provider settings.** The Settings panel saves `main` and optional `summary` provider details with Fernet encryption; API keys are only returned to the browser in masked form.
-- **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. The built-ins are `calculator`, workspace-confined `read_file`, `load_skill`, and `remove_skill`.
+- **Skills and tools.** Trusted Markdown Skills can be selected in the UI, mentioned with `@skill-name`, or managed by tools. Alongside `calculator`, `load_skill`, and `remove_skill`, every run receives workspace-confined `read`, `write`, `edit`, `grep`, `find`, and `ls` file tools.
+- **Default Wenqu workflow.** The packaged `wenqu` Skill is injected once into every conversation and routes its seven coaching stages. Training files live under the browser workspace, so another conversation in the same browser can explicitly resume them.
 - **Bounded execution.** Agent turns, consecutive tool failures, tool timeouts, tool-output size, and context size are configurable limits.
-- **Responsive chat UI.** The frontend supports GFM Markdown, code highlighting, collapsible execution traces, light/dark themes, a bundled local font, and a lazy-loaded Three.js lake background with a reduced-motion fallback.
+- **Responsive chat UI.** The frontend shows a compact, collapsed `Thinking` row instead of exposing reasoning inline; compatible plaintext summaries can be expanded, while tool traces remain separate.
 - **Durable local storage.** SQLite is the source of truth. Redis is optional and used only as a best-effort side cache; an in-memory TTL cache is always available.
 
 ## Architecture
@@ -37,19 +39,21 @@ The important dependency rule is: **the Agent Core depends on ports, not FastAPI
 
 1. The SPA calls `GET /api/bootstrap`; the server reuses or creates an HttpOnly `workspace_id` cookie.
 2. The SPA loads sessions, Skills, public limits, and masked user configuration. Private API requests are then scoped to that workspace by `AuthMiddleware`.
-3. A message goes to `POST /api/chat`. The API validates the session and model configuration, allows one active run per workspace/session, then opens an SSE stream.
-4. `AgentCore` persists the user message, injects selected/mentioned Skills, prepares a token-budgeted context, calls the `main` model, and executes any requested tools within configured limits.
-5. Typed events flow back as SSE frames and are reduced into text and execution traces by `App.tsx`. `POST /api/chat/abort` requests cooperative cancellation.
+3. A message and its `reasoning_effort` go to `POST /api/chat`. The API accepts exactly `low`, `medium`, `high`, or `max`, allows one active run per workspace/session, then opens an SSE stream.
+4. `AgentCore` injects configured default Skills before the user message, once per conversation, then adds explicitly selected or mentioned Skills. It applies the reasoning effort unchanged to every `main` model call in the run; the separate `summary` role does not inherit it.
+5. Text, best-effort plaintext reasoning summaries, and tool events flow back as typed SSE. The assistant answer and reasoning metadata are persisted under one request id so history restores as one turn.
 
 ### Context and model roles
 
 - `main` is required for chat. It is the model used for streaming responses and tool calls.
 - `summary` is optional. It is used for context compression and first-message titles when its configuration is complete. If it fails or is unavailable, chat remains available: title generation falls back to the first prompt and context compression falls back to deterministic trimming.
+- `reasoning_effort` is sent as a top-level Chat Completions parameter with no model-specific remapping or silent fallback. Unsupported model/effort pairs surface through the normal error path.
+- Chat Completions has no official reasoning-summary contract. The adapter only forwards direct plaintext from compatible gateway fields (`reasoning_content`, `reasoning`, or `thinking`) and ignores structured/opaque payloads.
 - `ContextManager` estimates mixed Chinese/English tokens, preserves recent messages and Skill injections, and keeps an assistant tool call with its tool replies as one atomic group.
 
 ### Skills and tool safety
 
-Skills are Markdown files under `<workspace root>/skills` (the repository's default is [`skills/`](skills/)). They must include front matter:
+Skills are loaded from the repository's [`skills/`](skills/) catalogue. The preferred package layout is `skills/<name>/SKILL.md`; legacy flat `skills/<name>.md` files remain supported. A package directory must match its front-matter `name`, which prevents ambiguous discovery. Every Skill must include front matter:
 
 ```markdown
 ---
@@ -60,7 +64,31 @@ description: Turn a broad goal into a small executable plan.
 Trusted instructions for the model go here.
 ```
 
-Loaded Skills are persisted and deduplicated per conversation. `read_file` resolves paths inside the active workspace root and limits file size; it is an application-level guard, not an operating-system sandbox.
+Loaded Skills are persisted and deduplicated per conversation. `agent.default_skills` (or `AGENT_DEFAULT_SKILLS`) loads trusted root Skills automatically; default Skills are protected from `remove_skill`. Every file tool accepts relative or absolute paths but resolves them inside the active browser workspace root, including symlink checks. This is an application-level guard, not an operating-system sandbox.
+
+The checked-in default is `wenqu`, adapted as one root package plus seven stage packages without a duplicate `README.md` or `AGENT.md`. Its runtime state is separate from the installed Skill text:
+
+```text
+<workspace root>/<workspace_id>/wenqu/sessions/<training_id>/
+  current.md
+  stage_v1.md
+  lesson-v1.md
+  stage_v2.md
+  lesson-v2.md
+```
+
+`current.md.owner_conversation_id` gives one application conversation write ownership at a time. A resume request always lists every historical training, even when there is only one candidate, and transfers ownership only after the user selects it. Deleting a conversation removes its SQLite history but intentionally preserves these workspace training files. Different browser workspaces remain isolated.
+
+| Tool | Main behavior |
+| --- | --- |
+| `read` | Reads text from a 1-based `offset`, capped at 2,000 lines / 50KB. JPG, PNG, GIF, WebP, and BMP files are resized to a 1,568px longest edge and attached only to the active model run. |
+| `write` | Atomically creates or replaces a UTF-8 file and creates missing parent directories. |
+| `edit` | Atomically applies unique, non-overlapping replacements matched against the original file; its unified diff is shown in the execution trace. |
+| `grep` | Searches non-ignored text files with regex/literal, glob, case, context, and result-limit controls. |
+| `find` | Finds non-ignored files by glob and returns paths relative to the search directory. |
+| `ls` | Lists one directory alphabetically, including dotfiles, with `/` suffixes for directories. |
+
+`grep` and `find` follow Git-compatible `.gitignore` rules and never enter `.git`. Search/list output is capped at 50KB. If an OpenAI-compatible endpoint explicitly rejects image input, the client retries once without image data, tells the model that vision is unavailable, and remembers that limitation for that model client.
 
 ## Repository map
 
@@ -73,7 +101,7 @@ server/
 web/
   src/                 React application, API client/SSE parser, components, visual scene
   public/fonts/        Bundled LXGW WenKai Lite font and its license information
-skills/                Trusted Markdown Skill catalogue
+skills/                Trusted flat and packaged Skill catalogue; Wenqu workflow
 tests/                 Python unit/integration tests
 deploy/                Ubuntu + nginx + systemd deployment templates and guide
 docs/architecture.mmd  Canonical Mermaid architecture diagram
@@ -130,7 +158,7 @@ Open **Settings** and fill in `main` `base_url`, `api_key`, and `model`. Use **T
 | Config file | `AGENT_CONFIG` |
 | Secret and identity | `AGENT_SECRET_KEY`, `AGENT_REQUIRE_USER_CONFIG`, `AGENT_COOKIE_SECURE` |
 | Main / summary provider | `AGENT_MAIN_*`, `AGENT_SUMMARY_*` (`API_KEY`, `BASE_URL`, `MODEL`, `MAX_TOKENS`, `TIMEOUT_S`, `TEMPERATURE`) |
-| Agent / context limits | `AGENT_MAX_TURNS`, `AGENT_MAX_TOOL_RETRIES`, `AGENT_TOOL_TIMEOUT_S`, `AGENT_TOOL_RESULT_MAX_CHARS`, `AGENT_TOKEN_BUDGET`, `AGENT_SUMMARY_TRIGGER_RATIO`, `AGENT_PRESERVE_RECENT_MESSAGES` |
+| Agent / context limits | `AGENT_MAX_TURNS`, `AGENT_MAX_TOOL_RETRIES`, `AGENT_TOOL_TIMEOUT_S`, `AGENT_TOOL_RESULT_MAX_CHARS`, `AGENT_DEFAULT_SKILLS`, `AGENT_TOKEN_BUDGET`, `AGENT_SUMMARY_TRIGGER_RATIO`, `AGENT_PRESERVE_RECENT_MESSAGES` |
 | Storage and cache | `AGENT_SQLITE_PATH`, `REDIS_URL`, `AGENT_CACHE_TTL_S` |
 | Server and SPA | `AGENT_HOST`, `AGENT_PORT`, `AGENT_CORS_ORIGINS`, `AGENT_STATIC_DIR` |
 | Workspace | `AGENT_WORKSPACE_ID`, `AGENT_WORKSPACE_NAME`, `AGENT_WORKSPACE_ROOT` |
@@ -149,7 +177,7 @@ The checked-in `config.yaml` sets `llm.require_user_config: true`. In that mode,
 | `GET /api/skills`, `GET /api/config` | Discover Skills and browser-safe runtime information |
 | `GET` / `PUT /api/user/config` | Read masked and write encrypted model settings |
 | `POST /api/user/config/test` | Probe submitted provider roles without saving them |
-| `POST /api/chat` | Start the typed SSE chat stream |
+| `POST /api/chat` | Start SSE chat; body includes `reasoning_effort` (`low` / `medium` / `high` / `max`, default `medium`) |
 | `POST /api/chat/abort` | Request cooperative cancellation of an active run |
 | `GET /api/health` | Health check |
 
@@ -175,5 +203,5 @@ Before exposing this project beyond a trusted private environment, add real auth
 
 - The `workspace_id` cookie and `X-Workspace-ID` scope data; they are **not** authentication or authorization.
 - `AGENT_SECRET_KEY` encrypts stored API keys. Rotating or losing it makes existing encrypted keys unreadable.
-- Files read by `read_file` and the contents of trusted Skills can be sent to the configured remote model endpoint. Keep secrets outside the workspace root and review Skills before enabling them.
+- Text and images returned by `read`, plus the contents of trusted Skills, can be sent to the configured remote model endpoint. Image data is not persisted in SQLite or exposed through SSE. Keep secrets outside the workspace root and review Skills before enabling them.
 - CORS is a browser policy, not access control. Set `AGENT_COOKIE_SECURE=true` for HTTPS deployments.

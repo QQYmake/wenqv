@@ -8,13 +8,15 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 
 ## 已实现能力
 
-- **流式 Agent 对话。** 可取消的 ReAct 循环会持续发送类型化 SSE 事件：文本、工具调用、工具结果、错误与完成状态。
+- **每轮思考强度。** 输入框左下角可选 `low`、`medium`、`high`、`max`，浏览器记住上次选择，并应用到该轮 ReAct 的全部 `main` 调用。
+- **流式 Agent 对话。** 可取消的 ReAct 循环会持续发送文本、可用的思考摘要、工具调用、工具结果、错误与完成状态。
 - **持久化会话。** 可创建、恢复、重命名和删除会话；消息、工具执行轨迹与已加载 Skills 保存在 SQLite 中。
 - **按 workspace 隔离的状态。** `workspace_id` HttpOnly Cookie 让浏览器刷新后仍能访问同一组会话和已保存的模型配置。
 - **加密的模型设置。** 设置面板保存 `main` 和可选 `summary` 两个角色的配置，并用 Fernet 加密 API key；浏览器只能得到掩码后的 key。
-- **Skills 与工具。** 可信 Markdown Skills 可在 UI 中选择、通过 `@skill-name` 提及，或由工具管理。内置工具为 `calculator`、限定 workspace 的 `read_file`、`load_skill` 与 `remove_skill`。
+- **Skills 与工具。** 可信 Markdown Skills 可在 UI 中选择、通过 `@skill-name` 提及，或由工具管理。除 `calculator`、`load_skill`、`remove_skill` 外，每次运行都会获得限定 workspace 的 `read`、`write`、`edit`、`grep`、`find`、`ls` 文件工具。
+- **默认问渠工作流。** 目录式 `wenqu` Skill 会自动注入每个 conversation，并路由七个备课阶段；训练文件保存在浏览器 workspace 中，同一浏览器的其他 conversation 可经明确选择后续训。
 - **有界执行。** Agent 轮数、连续工具失败次数、工具超时、工具输出大小和上下文大小都可配置。
-- **响应式聊天界面。** 前端支持 GFM Markdown、代码高亮、可折叠执行轨迹、明暗主题、本地打包字体，以及懒加载的 Three.js 湖面和 reduced-motion fallback。
+- **低干扰聊天界面。** 助手回合只固定显示一行默认折叠的“思考中”；兼容端点返回纯文本摘要时可点击展开，工具轨迹仍单独可见。
 - **可靠的本地存储。** SQLite 是事实数据源。Redis 仅作为可选的尽力而为旁路缓存；内存 TTL 缓存始终可用。
 
 ## 总体架构
@@ -37,19 +39,21 @@ Blue Lake Agent 是一个可自托管、单进程的工具调用型 LLM 聊天�
 
 1. SPA 调用 `GET /api/bootstrap`；服务端创建或复用 HttpOnly `workspace_id` Cookie。
 2. SPA 加载会话、Skills、公开运行限制和掩码后的用户配置。此后，`AuthMiddleware` 将私有 API 请求限定在当前 workspace。
-3. 消息发往 `POST /api/chat`。API 校验会话和模型配置，并保证每个 workspace/session 同时至多有一个运行，然后打开 SSE 流。
-4. `AgentCore` 持久化用户消息，注入已选择或 `@mention` 的 Skills，准备满足 token 预算的上下文，调用 `main` 模型，并在配置限制内执行模型请求的工具。
-5. 类型化事件以 SSE 帧回到前端，由 `App.tsx` 归约为文本和执行轨迹。`POST /api/chat/abort` 会请求协作式取消。
+3. 消息连同 `reasoning_effort` 发往 `POST /api/chat`；API 只接受 `low`、`medium`、`high`、`max`，随后打开 SSE 流。
+4. `AgentCore` 在用户消息前为每个 conversation 注入一次默认 Skill，再加载显式选择或提及的 Skill；所选思考强度原样应用到该次运行的每个 `main` 调用，独立的 `summary` 角色不继承它。
+5. 回答、尽力提取的纯文本思考摘要和工具事件以类型化 SSE 返回。回答与思考元数据按同一 `request_id` 持久化，刷新后仍合并为一个助手回合。
 
 ### 上下文与模型角色
 
 - `main` 是对话必需角色，负责流式回答和工具调用。
 - `summary` 是可选角色；配置完整时用于上下文压缩和首条消息标题。它不可用或失败时，对话仍可继续：标题回退为首条提示词，上下文压缩回退为确定性裁剪。
+- `reasoning_effort` 作为 Chat Completions 顶层参数发送，不做模型特定映射，也不静默降档；模型不支持某个档位时沿用现有可读错误链路。
+- Chat Completions 没有官方思考摘要契约。适配器只转发兼容网关在 `reasoning_content`、`reasoning` 或 `thinking` 中提供的直接纯文本，并忽略结构化或不透明内容。
 - `ContextManager` 会估算中英文混合 token，保留近期消息与 Skill 注入，并把一条 assistant 工具调用和其工具回复视为不可拆分的一组。
 
 ### Skills 与工具安全
 
-Skills 是 `<workspace root>/skills` 下的 Markdown 文件；默认配置下即仓库的 [`skills/`](skills/) 目录。每个文件必须带有 front matter：
+Skills 从仓库的 [`skills/`](skills/) 目录加载。推荐结构是 `skills/<name>/SKILL.md`，同时兼容旧的 `skills/<name>.md`；目录名必须与 front matter 的 `name` 一致，避免重复或歧义。每个 Skill 必须带有 front matter：
 
 ```markdown
 ---
@@ -60,7 +64,31 @@ description: Turn a broad goal into a small executable plan.
 在这里写入可信的模型指令。
 ```
 
-已加载的 Skill 会按会话持久化并去重。`read_file` 只能解析 workspace root 内的路径并限制文件大小；这是应用层保护，不是操作系统级 sandbox。
+已加载的 Skill 会按 conversation 持久化并去重。`agent.default_skills`（或 `AGENT_DEFAULT_SKILLS`）会自动加载可信根 Skill，默认 Skill 不能被 `remove_skill` 卸载。所有文件工具都可接收相对或绝对路径，但解析结果（包括 symlink）必须位于当前浏览器 workspace root 内。这是应用层保护，不是操作系统级 sandbox。
+
+仓库默认启用 `wenqu`：一个总控 Skill 加七个阶段 Skill，不再保留功能重合的 `README.md` 或 `AGENT.md`。安装指令与运行数据分离，训练档案统一写到：
+
+```text
+<workspace root>/<workspace_id>/wenqu/sessions/<training_id>/
+  current.md
+  stage_v1.md
+  lesson-v1.md
+  stage_v2.md
+  lesson-v2.md
+```
+
+`current.md.owner_conversation_id` 表示唯一写入 owner。用户要求续训时，即使只有一个候选也必须先列出全部历史训练，确认选择后才转移 owner。删除 conversation 只删除 SQLite 聊天记录，不删除 workspace 里的训练档案；不同浏览器 workspace 仍彼此隔离。
+
+| 工具 | 主要行为 |
+| --- | --- |
+| `read` | 从 1-based `offset` 读取文本，最多 2,000 行 / 50KB；JPG、PNG、GIF、WebP、BMP 会把最长边缩至 1,568px，只在当前模型运行中临时附加。 |
+| `write` | 原子创建或覆盖 UTF-8 文件，并自动创建父目录。 |
+| `edit` | 基于原始文件原子执行唯一、互不重叠的替换；unified diff 会显示在执行轨迹中。 |
+| `grep` | 在未忽略的文本文件中搜索，支持 regex/literal、glob、大小写、上下文和数量限制。 |
+| `find` | 按 glob 查找未忽略文件，返回相对搜索目录的路径。 |
+| `ls` | 按字母列出单个目录，包含点文件，目录名带 `/`。 |
+
+`grep` 与 `find` 遵循 Git-compatible `.gitignore` 规则且不会进入 `.git`；搜索和列表输出最多 50KB。若 OpenAI-compatible 端点明确拒绝图片输入，客户端会去掉图片重试一次，向模型说明视觉不可用，并为该模型客户端记住此限制。
 
 ## 仓库导览
 
@@ -73,7 +101,7 @@ server/
 web/
   src/                 React 应用、API client/SSE parser、组件、视觉场景
   public/fonts/        内置 LXGW WenKai Lite 字体及其许可说明
-skills/                可信 Markdown Skill 目录
+skills/                可信平铺/目录式 Skill；包含问渠工作流
 tests/                 Python 单元/集成测试
 deploy/                Ubuntu + nginx + systemd 部署模板与指南
 docs/architecture.mmd  Mermaid 架构图规范源文件
@@ -130,7 +158,7 @@ npm run dev
 | 配置文件 | `AGENT_CONFIG` |
 | 密钥与身份 | `AGENT_SECRET_KEY`、`AGENT_REQUIRE_USER_CONFIG`、`AGENT_COOKIE_SECURE` |
 | 主 / 摘要模型 | `AGENT_MAIN_*`、`AGENT_SUMMARY_*`（`API_KEY`、`BASE_URL`、`MODEL`、`MAX_TOKENS`、`TIMEOUT_S`、`TEMPERATURE`） |
-| Agent / context 限制 | `AGENT_MAX_TURNS`、`AGENT_MAX_TOOL_RETRIES`、`AGENT_TOOL_TIMEOUT_S`、`AGENT_TOOL_RESULT_MAX_CHARS`、`AGENT_TOKEN_BUDGET`、`AGENT_SUMMARY_TRIGGER_RATIO`、`AGENT_PRESERVE_RECENT_MESSAGES` |
+| Agent / context 限制 | `AGENT_MAX_TURNS`、`AGENT_MAX_TOOL_RETRIES`、`AGENT_TOOL_TIMEOUT_S`、`AGENT_TOOL_RESULT_MAX_CHARS`、`AGENT_DEFAULT_SKILLS`、`AGENT_TOKEN_BUDGET`、`AGENT_SUMMARY_TRIGGER_RATIO`、`AGENT_PRESERVE_RECENT_MESSAGES` |
 | 存储与缓存 | `AGENT_SQLITE_PATH`、`REDIS_URL`、`AGENT_CACHE_TTL_S` |
 | 服务端与 SPA | `AGENT_HOST`、`AGENT_PORT`、`AGENT_CORS_ORIGINS`、`AGENT_STATIC_DIR` |
 | Workspace | `AGENT_WORKSPACE_ID`、`AGENT_WORKSPACE_NAME`、`AGENT_WORKSPACE_ROOT` |
@@ -149,7 +177,7 @@ npm run dev
 | `GET /api/skills`、`GET /api/config` | 获取 Skills 与浏览器安全的运行时信息 |
 | `GET` / `PUT /api/user/config` | 读取掩码设置、写入加密模型设置 |
 | `POST /api/user/config/test` | 不保存地探测提交的模型角色 |
-| `POST /api/chat` | 开始类型化 SSE 对话流 |
+| `POST /api/chat` | 开始 SSE 对话；body 含 `reasoning_effort`（四档，默认 `medium`） |
 | `POST /api/chat/abort` | 请求协作式取消当前运行 |
 | `GET /api/health` | 健康检查 |
 
@@ -175,5 +203,5 @@ npm run build
 
 - `workspace_id` Cookie 与 `X-Workspace-ID` 只做数据作用域划分，**不构成认证或授权**。
 - `AGENT_SECRET_KEY` 用于加密保存的 API key。轮换或丢失它，会使旧的加密 key 无法读取。
-- `read_file` 读取的文件和可信 Skill 的内容可能被发送到配置的远程模型端点。应把 secrets 放在 workspace root 外，并在启用前审查 Skills。
+- `read` 返回的文本、图片以及可信 Skill 内容可能被发送到配置的远程模型端点。图片数据不会写入 SQLite，也不会通过 SSE 暴露。应把 secrets 放在 workspace root 外，并在启用前审查 Skills。
 - CORS 是浏览器策略，不是访问控制。HTTPS 部署必须设置 `AGENT_COOKIE_SECURE=true`。

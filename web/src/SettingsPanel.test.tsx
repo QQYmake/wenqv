@@ -80,10 +80,12 @@ describe("Composer disabled state", () => {
         selectedSkills={new Set()}
         streaming={false}
         apiConfigured={false}
+        reasoningEffort="medium"
         onChange={vi.fn()}
         onSubmit={vi.fn()}
         onAbort={vi.fn()}
         onToggleSkill={vi.fn()}
+        onReasoningEffortChange={vi.fn()}
       />,
     );
     const textarea = screen.getByRole("textbox", { name: "消息" });
@@ -102,10 +104,12 @@ describe("Composer disabled state", () => {
         selectedSkills={new Set()}
         streaming={false}
         apiConfigured
+        reasoningEffort="medium"
         onChange={vi.fn()}
         onSubmit={vi.fn()}
         onAbort={vi.fn()}
         onToggleSkill={vi.fn()}
+        onReasoningEffortChange={vi.fn()}
       />,
     );
     expect(screen.getByRole("textbox", { name: "消息" })).not.toBeDisabled();

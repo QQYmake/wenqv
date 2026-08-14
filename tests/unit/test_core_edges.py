@@ -37,7 +37,7 @@ class ScriptedClient:
         self.scripts = list(scripts)
         self.stream_calls = 0
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         self.stream_calls += 1
         if not self.scripts:
             raise AssertionError("No scripted LLM turn remains")
@@ -120,7 +120,7 @@ class ExplodingClient(ScriptedClient):
         self.fail_first = fail_first
         self.message = message
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         self.stream_calls += 1
         if self.fail_first:
             self.fail_first = False
@@ -152,7 +152,7 @@ def test_model_stream_raising_propagates_as_error_then_done(tmp_path) -> None:
 
 def test_model_stream_yielding_wrong_type_is_reported_as_error(tmp_path) -> None:
     class WrongTypeClient(ScriptedClient):
-        async def stream(self, messages, *, tools=None, max_tokens=None):
+        async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
             yield {"type": "text_delta", "delta": "not an LLMStreamChunk"}  # type: ignore[misc]
 
     core = make_core(tmp_path, WrongTypeClient([[]]))

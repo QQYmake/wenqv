@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
 from .models import (
@@ -110,6 +110,7 @@ class OpenAICompatClient:
     def __init__(self, config: LLMConfig, *, sdk_client: Any | None = None) -> None:
         self.config = config
         self._sdk_client = sdk_client
+        self._vision_supported: bool | None = None
 
     def _client(self) -> Any:
         if self._sdk_client is None:
@@ -142,6 +143,9 @@ class OpenAICompatClient:
             request["max_tokens"] = max_tokens
         if self.config.temperature is not None:
             request["temperature"] = self.config.temperature
+        reasoning_effort = overrides.get("reasoning_effort")
+        if reasoning_effort is not None:
+            request["reasoning_effort"] = reasoning_effort
         if self.config.extra_body:
             request["extra_body"] = dict(self.config.extra_body)
         return request
@@ -179,11 +183,39 @@ class OpenAICompatClient:
         *,
         tools: Sequence[dict] | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
-        response = await self._client().chat.completions.create(
-            **self._request(messages, tools=tools, max_tokens=max_tokens),
-            stream=True,
+        request_messages = (
+            _without_images(messages)
+            if self._vision_supported is False and _has_images(messages)
+            else tuple(messages)
         )
+        request = self._request(
+            request_messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+        try:
+            response = await self._client().chat.completions.create(
+                **request, stream=True
+            )
+        except Exception as exc:
+            if not _has_images(request_messages) or not _is_explicit_vision_rejection(exc):
+                raise
+            # Compatible gateways vary in multimodal support. Retry exactly once
+            # without image parts only when the endpoint explicitly rejects them.
+            self._vision_supported = False
+            fallback_messages = _without_images(request_messages)
+            response = await self._client().chat.completions.create(
+                **self._request(
+                    fallback_messages,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
+                ),
+                stream=True,
+            )
         async for chunk in response:
             if not chunk.choices:
                 continue
@@ -206,9 +238,70 @@ class OpenAICompatClient:
             )
             yield LLMStreamChunk(
                 content_delta=getattr(delta, "content", None) or "",
+                reasoning_delta=_reasoning_text(delta),
                 tool_call_deltas=tool_deltas,
                 finish_reason=getattr(choice, "finish_reason", None),
             )
+
+
+def _reasoning_text(delta: Any) -> str:
+    """Extract plaintext summaries exposed by compatible Chat gateways.
+
+    These fields are not an official Chat Completions summary contract. Only
+    direct strings are forwarded; structured or opaque payloads are ignored.
+    """
+
+    for name in ("reasoning_content", "reasoning", "thinking"):
+        value = getattr(delta, name, None)
+        if isinstance(value, str):
+            return value
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, Mapping):
+        for name in ("reasoning_content", "reasoning", "thinking"):
+            value = extra.get(name)
+            if isinstance(value, str):
+                return value
+    return ""
+
+
+def _has_images(messages: Sequence[ChatMessage]) -> bool:
+    return any(message.attachments for message in messages)
+
+
+def _without_images(messages: Sequence[ChatMessage]) -> tuple[ChatMessage, ...]:
+    fallback: list[ChatMessage] = []
+    for message in messages:
+        if not message.attachments:
+            fallback.append(message)
+            continue
+        paths = ", ".join(attachment.path for attachment in message.attachments)
+        notice = (
+            "[The configured model endpoint does not support visual input. "
+            f"Images could not be attached: {paths}]"
+        )
+        content = f"{message.content}\n\n{notice}" if message.content else notice
+        fallback.append(replace(message, content=content, attachments=()))
+    return tuple(fallback)
+
+
+def _is_explicit_vision_rejection(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    if status not in {400, 422}:
+        return False
+    body = getattr(exc, "body", None)
+    text = " ".join((str(exc), str(body or ""))).lower()
+    modality = any(
+        term in text
+        for term in ("image", "vision", "multimodal", "image_url", "content part")
+    )
+    rejection = any(
+        term in text
+        for term in ("unsupported", "not support", "invalid", "not allowed", "unknown")
+    )
+    return modality and rejection
 
 
 ClientBuilder = Callable[[LLMConfig], LLMClient]

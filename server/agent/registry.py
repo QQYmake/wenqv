@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .models import ImageAttachment
 from .ports import ConversationStore
 
 
@@ -26,6 +27,7 @@ class ToolExecutionContext:
     workspace_root: Path
     request_id: str
     workspace_id: str | None = None
+    cancel_event: asyncio.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +36,7 @@ class ToolOutput:
 
     value: Any
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    attachments: tuple[ImageAttachment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,9 +47,10 @@ class ToolExecutionResult:
     truncated: bool = False
     original_chars: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    attachments: tuple[ImageAttachment, ...] = ()
 
     def event_data(self, *, tool_call_id: str) -> dict[str, Any]:
-        return {
+        event = {
             "call_id": tool_call_id,
             # Compatibility alias for adapters that mirror the persisted field.
             "tool_call_id": tool_call_id,
@@ -60,6 +64,13 @@ class ToolExecutionResult:
                 else {}
             ),
         }
+        patch = self.metadata.get("ui_patch")
+        if isinstance(patch, str):
+            event["patch"] = patch
+            event["patch_truncated"] = bool(
+                self.metadata.get("ui_patch_truncated", False)
+            )
+        return event
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +148,10 @@ class ToolRegistry:
                 raise TypeError("Tool executor must return an awaitable")
             value = await asyncio.wait_for(result, timeout=timeout_s)
             metadata: Mapping[str, Any] = {}
+            attachments: tuple[ImageAttachment, ...] = ()
             if isinstance(value, ToolOutput):
                 metadata = value.metadata
+                attachments = value.attachments
                 value = value.value
             content = _serialise(value)
             is_error = isinstance(value, Mapping) and value.get("error") is True
@@ -148,6 +161,7 @@ class ToolRegistry:
                     content=content,
                     error=is_error,
                     metadata=metadata,
+                    attachments=attachments,
                 ),
                 max_result_chars,
             )
@@ -193,6 +207,7 @@ def _truncate_result(
         truncated=True,
         original_chars=len(result.content),
         metadata=result.metadata,
+        attachments=result.attachments,
     )
 
 

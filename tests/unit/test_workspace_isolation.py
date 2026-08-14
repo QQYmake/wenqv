@@ -1,10 +1,10 @@
-"""Unit tests for the per-workspace file isolation resolver and read_file."""
+"""Unit tests for the per-workspace file isolation resolver and read tool."""
 
 from __future__ import annotations
 
 import pytest
 
-from server.agent.tools.read_file import read_file_tool
+from server.agent.tools import read_tool
 from server.agent.registry import ToolExecutionContext
 from server.agent.memory import InMemoryConversationStore
 from server.storage import IsolatedWorkspaceResolver
@@ -35,7 +35,7 @@ def test_workspace_resolver_rejects_traversal(tmp_path) -> None:
         resolver(" spacey id")
 
 
-def test_read_file_rejects_path_outside_workspace_root(tmp_path) -> None:
+def test_read_rejects_path_outside_workspace_root(tmp_path) -> None:
     resolver = IsolatedWorkspaceResolver(tmp_path)
 
     alpha_root = resolver("ws-alpha")
@@ -49,7 +49,7 @@ def test_read_file_rejects_path_outside_workspace_root(tmp_path) -> None:
     other_file.write_text("beta-secret", encoding="utf-8")
 
     store = InMemoryConversationStore()
-    tool = read_file_tool()
+    tool = read_tool()
     ctx_alpha = ToolExecutionContext(
         session_id="s1",
         store=store,
@@ -60,11 +60,11 @@ def test_read_file_rejects_path_outside_workspace_root(tmp_path) -> None:
 
     import asyncio
 
-    async def run_alpha() -> dict:
+    async def run_alpha() -> str:
         return await tool.executor({"path": "notes.txt"}, ctx_alpha)
 
     result = asyncio.run(run_alpha())
-    assert result["content"] == "alpha-secret"
+    assert result == "alpha-secret"
 
     # An absolute path pointing at the other workspace is rejected.
     async def run_cross() -> None:

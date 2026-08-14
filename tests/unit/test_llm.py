@@ -4,15 +4,20 @@ from collections.abc import AsyncIterator, Sequence
 
 import pytest
 
-from server.agent.llm import LLMClientFactory, LLMConfig, OpenAICompatClient
-from server.agent.models import ChatMessage, LLMResponse, LLMStreamChunk
+from server.agent.llm import (
+    LLMClientFactory,
+    LLMConfig,
+    OpenAICompatClient,
+    _reasoning_text,
+)
+from server.agent.models import ChatMessage, ImageAttachment, LLMResponse, LLMStreamChunk
 
 
 class FakeClient:
     async def complete(self, messages, *, tools=None, max_tokens=None):
         return LLMResponse("ok")
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
         yield LLMStreamChunk(content_delta="ok")
 
 
@@ -62,6 +67,116 @@ def test_mapping_build_is_lazy_cached_and_timeout_is_not_extra_body() -> None:
 def test_llm_config_rejects_nonpositive_timeout() -> None:
     with pytest.raises(ValueError, match="timeout"):
         LLMConfig("https://example.test/v1", "key", "model", timeout_s=0)
+
+
+def test_reasoning_effort_is_a_top_level_chat_parameter() -> None:
+    client = OpenAICompatClient(
+        LLMConfig(
+            "https://example.test/v1",
+            "key",
+            "model",
+            extra_body={"provider_flag": True},
+        )
+    )
+
+    request = client._request(
+        [ChatMessage(role="user", content="hi")],
+        reasoning_effort="max",
+    )
+
+    assert request["reasoning_effort"] == "max"
+    assert request["extra_body"] == {"provider_flag": True}
+    assert "reasoning_effort" not in request["extra_body"]
+
+
+@pytest.mark.parametrize("field", ["reasoning_content", "reasoning", "thinking"])
+def test_plaintext_gateway_reasoning_fields_are_extracted(field: str) -> None:
+    delta = type("Delta", (), {field: "可展示摘要"})()
+    assert _reasoning_text(delta) == "可展示摘要"
+
+
+def test_structured_or_opaque_reasoning_is_ignored() -> None:
+    delta = type(
+        "Delta",
+        (),
+        {
+            "reasoning_content": {"encrypted": "opaque"},
+            "model_extra": {"thinking": ["not", "plaintext"]},
+        },
+    )()
+    assert _reasoning_text(delta) == ""
+
+
+def test_chat_message_serializes_ephemeral_images_as_user_content_parts() -> None:
+    attachment = ImageAttachment(
+        path="diagram.png",
+        data_url="data:image/png;base64,AA==",
+        media_type="image/png",
+        width=10,
+        height=20,
+    )
+    message = ChatMessage(role="user", content="inspect", attachments=(attachment,))
+    assert message.to_llm_dict()["content"] == [
+        {"type": "text", "text": "inspect"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AA==", "detail": "auto"},
+        },
+    ]
+    assert "attachments" not in message.to_dict()
+
+
+def test_openai_client_retries_explicit_vision_rejection_once_without_images() -> None:
+    class VisionError(Exception):
+        status_code = 400
+        body = {"message": "image_url is unsupported by this model"}
+
+    class Streaming:
+        def __aiter__(self):
+            async def iterate():
+                choice = type(
+                    "Choice",
+                    (),
+                    {
+                        "delta": type("Delta", (), {"content": "ok", "tool_calls": ()})(),
+                        "finish_reason": "stop",
+                    },
+                )()
+                yield type("Chunk", (), {"choices": [choice]})()
+            return iterate()
+
+    class Completions:
+        def __init__(self):
+            self.calls = []
+
+        async def create(self, **request):
+            self.calls.append(request)
+            if len(self.calls) == 1:
+                raise VisionError("image content part is not supported")
+            return Streaming()
+
+    completions = Completions()
+    sdk = type("SDK", (), {"chat": type("Chat", (), {"completions": completions})()})()
+    client = OpenAICompatClient(
+        LLMConfig("https://example.test/v1", "key", "model"), sdk_client=sdk
+    )
+    attachment = ImageAttachment(
+        "image.png", "data:image/png;base64,AA==", "image/png", 1, 1
+    )
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in client.stream(
+                [ChatMessage(role="user", content="look", attachments=(attachment,))]
+            )
+        ]
+
+    chunks = __import__("asyncio").run(collect())
+    assert chunks[0].content_delta == "ok"
+    assert len(completions.calls) == 2
+    assert isinstance(completions.calls[0]["messages"][0]["content"], list)
+    assert "does not support visual input" in completions.calls[1]["messages"][0]["content"]
 
 
 def test_factory_accepts_an_application_config_object() -> None:

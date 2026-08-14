@@ -18,6 +18,7 @@ class LLMClient(Protocol):
         *,
         tools: Sequence[dict] | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[LLMStreamChunk]: ...
 
     async def complete(
@@ -82,4 +83,3 @@ class ConversationStore(Protocol):
 
 class WorkspaceResolver(Protocol):
     def __call__(self, workspace_id: str | None) -> Path: ...
-

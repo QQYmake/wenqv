@@ -89,9 +89,16 @@ describe("App", () => {
     const user = userEvent.setup();
     const client = makeClient({
       events: [
+        { type: "reasoning_delta", delta: "先检查工具结果。" },
         { type: "skill_loaded", name: "research", already_loaded: false },
         { type: "tool_call", call_id: "call-1", name: "calculator", arguments: { expression: "2+2" } },
-        { type: "tool_result", tool_call_id: "call-1", name: "calculator", result: { value: 4 } },
+        {
+          type: "tool_result",
+          tool_call_id: "call-1",
+          name: "calculator",
+          result: { value: 4 },
+          patch: "--- a/note.txt\n+++ b/note.txt\n-old\n+new\n",
+        },
         { type: "text_delta", delta: "结果是 **4**。" },
         { type: "done", session_id: "new-session", finish_reason: "stop" },
       ],
@@ -106,13 +113,49 @@ describe("App", () => {
     expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText("research")).toBeInTheDocument();
     expect(screen.getByText("calculator")).toBeInTheDocument();
+    expect(screen.getByText("修改差异")).toBeInTheDocument();
+    const reasoningLabel = screen.getByText("思考中");
+    const reasoningDetails = reasoningLabel.closest("details");
+    expect(reasoningDetails).not.toHaveAttribute("open");
+    await user.click(reasoningLabel);
+    expect(reasoningDetails).toHaveAttribute("open");
+    expect(screen.getByText("先检查工具结果。")).toBeInTheDocument();
+    await user.click(reasoningLabel);
+    expect(reasoningDetails).not.toHaveAttribute("open");
     await waitFor(() => expect(client.streamChat).toHaveBeenCalledTimes(1));
     const body = vi.mocked(client.streamChat).mock.calls[0][0];
     expect(body).toEqual({
       session_id: "new-session",
       message: "@research calculate",
+      reasoning_effort: "medium",
       skills: ["research"],
     });
+  });
+
+  it("remembers the per-turn reasoning effort and keeps the marker without a summary", async () => {
+    const user = userEvent.setup();
+    const client = makeClient();
+    const { unmount } = render(<App client={client} renderWater={false} />);
+
+    const effort = screen.getByRole("combobox", { name: "思考强度" });
+    expect(effort).toHaveValue("medium");
+    await user.selectOptions(effort, "max");
+    expect(localStorage.getItem("blue-lake.reasoning-effort")).toBe("max");
+
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "认真回答");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    await waitFor(() => expect(client.streamChat).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(client.streamChat).mock.calls[0][0]).toEqual({
+      session_id: "new-session",
+      message: "认真回答",
+      reasoning_effort: "max",
+    });
+    expect(screen.getByText("思考中")).toBeInTheDocument();
+
+    unmount();
+    render(<App client={makeClient()} renderWater={false} />);
+    expect(screen.getByRole("combobox", { name: "思考强度" })).toHaveValue("max");
   });
 
   it("offers Skills as accessible checkboxes in chat settings", async () => {
@@ -173,6 +216,76 @@ describe("hydrateHistory", () => {
     expect(history[1]).toEqual(expect.objectContaining({ id: "skill-message", kind: "skill" }));
   });
 
+  it("merges one ReAct request into one restored assistant turn", () => {
+    const history = hydrateHistory([
+      {
+        id: "assistant-call-1",
+        role: "assistant",
+        kind: "tool_call",
+        content: "",
+        metadata: {
+          request_id: "run-1",
+          reasoning_effort: "high",
+          reasoning_summary: "先查数据。",
+          _agent: {
+            tool_calls: [{ id: "call-1", name: "search", arguments: { q: "lake" } }],
+          },
+        },
+      },
+      {
+        id: "tool-result-1",
+        role: "tool",
+        kind: "tool_result",
+        content: '{"result":{"hits":2}}',
+        metadata: { _agent: { tool_call_id: "call-1" } },
+      },
+      {
+        id: "assistant-call-2",
+        role: "assistant",
+        kind: "tool_call",
+        content: "",
+        metadata: {
+          request_id: "run-1",
+          reasoning_effort: "high",
+          reasoning_summary: "再核对。",
+          _agent: {
+            tool_calls: [{ id: "call-2", name: "calculator", arguments: { expression: "1+1" } }],
+          },
+        },
+      },
+      {
+        id: "tool-result-2",
+        role: "tool",
+        kind: "tool_result",
+        content: '{"result":{"value":2}}',
+        metadata: { _agent: { tool_call_id: "call-2" } },
+      },
+      {
+        id: "assistant-final",
+        role: "assistant",
+        content: "最终答案。",
+        metadata: {
+          request_id: "run-1",
+          reasoning_effort: "high",
+          reasoning_summary: "完成收束。",
+        },
+      },
+    ]);
+
+    expect(history).toHaveLength(1);
+    expect(history[0]).toEqual(
+      expect.objectContaining({
+        content: "最终答案。",
+        reasoningEffort: "high",
+        reasoningSummary: "先查数据。\n\n再核对。\n\n完成收束。",
+      }),
+    );
+    expect(history[0].traces).toEqual([
+      expect.objectContaining({ callId: "call-1", status: "success" }),
+      expect.objectContaining({ callId: "call-2", status: "success" }),
+    ]);
+  });
+
   it("renders persisted summaries and removed Skills as compact notices", () => {
     render(
       <MessageList
@@ -200,5 +313,24 @@ describe("hydrateHistory", () => {
     expect(screen.getByText("research")).toBeInTheDocument();
     expect(screen.getByText("\u5df2\u4ece\u4e0a\u4e0b\u6587\u79fb\u9664")).toBeInTheDocument();
     expect(screen.queryByText(/raw control text/)).not.toBeInTheDocument();
+  });
+
+  it("restores the permanent reasoning marker even when no summary was returned", () => {
+    const [message] = hydrateHistory([
+      {
+        id: "assistant-final",
+        role: "assistant",
+        content: "回答。",
+        metadata: {
+          request_id: "run-empty",
+          reasoning_effort: "medium",
+          reasoning_summary: "",
+        },
+      },
+    ]);
+
+    render(<MessageList messages={[message]} />);
+    expect(screen.getByText("思考中")).toBeInTheDocument();
+    expect(screen.getByText("回答。")).toBeInTheDocument();
   });
 });

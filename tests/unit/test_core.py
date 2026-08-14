@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from server.agent import (
     AgentConfig,
     AgentCore,
@@ -10,7 +12,9 @@ from server.agent import (
     LLMClientFactory,
     LLMResponse,
     LLMStreamChunk,
+    ImageAttachment,
     SkillManager,
+    SkillNotFoundError,
     Tool,
     ToolCallDelta,
     ToolRegistry,
@@ -55,8 +59,8 @@ class ScriptedClient:
         self.scripts = list(scripts)
         self.stream_calls = []
 
-    async def stream(self, messages, *, tools=None, max_tokens=None):
-        self.stream_calls.append((tuple(messages), tools, max_tokens))
+    async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
+        self.stream_calls.append((tuple(messages), tools, max_tokens, reasoning_effort))
         if not self.scripts:
             raise AssertionError("No scripted LLM turn remains")
         script = self.scripts.pop(0)
@@ -90,7 +94,7 @@ def test_multistep_react_loop_streams_two_tools_and_final_answer(tmp_path) -> No
     client = ScriptedClient(
         [
             tool_call("calc-1", "calculator", {"expression": "(17 + 5) * 3"}),
-            tool_call("read-1", "read_file", {"path": "note.txt"}),
+            tool_call("read-1", "read", {"path": "note.txt"}),
             text_response("The result is ", "66 and the file says blue lake."),
         ]
     )
@@ -120,6 +124,45 @@ def test_multistep_react_loop_streams_two_tools_and_final_answer(tmp_path) -> No
         "assistant",
     ]
     assert json.loads(messages[2].content)["value"] == 66
+
+
+def test_reasoning_effort_and_summary_cover_every_main_turn(tmp_path) -> None:
+    client = ScriptedClient(
+        [
+            [
+                LLMStreamChunk(reasoning_delta="先计算。"),
+                *tool_call("calc-1", "calculator", {"expression": "2+2"}),
+            ],
+            [
+                LLMStreamChunk(reasoning_delta="再整理答案。"),
+                *text_response("结果是 4。"),
+            ],
+        ]
+    )
+    core, store = make_core(tmp_path, client)
+
+    events = asyncio.run(
+        collect(core.stream("s1", "计算 2+2", reasoning_effort="max"))
+    )
+    payloads = [event.to_dict() for event in events]
+
+    assert [call[3] for call in client.stream_calls] == ["max", "max"]
+    assert "".join(
+        event["delta"] for event in payloads if event["type"] == "reasoning_delta"
+    ) == "先计算。再整理答案。"
+    assistants = [
+        message
+        for message in asyncio.run(store.list_messages("s1"))
+        if message.role == "assistant"
+    ]
+    assert [message.metadata["reasoning_effort"] for message in assistants] == [
+        "max",
+        "max",
+    ]
+    assert [message.metadata["reasoning_summary"] for message in assistants] == [
+        "先计算。",
+        "再整理答案。",
+    ]
 
 
 def test_tool_error_returns_to_model_and_does_not_crash_loop(tmp_path) -> None:
@@ -260,7 +303,7 @@ def test_abort_interrupts_a_blocked_model_stream(tmp_path) -> None:
             self.started = asyncio.Event()
             self.cancelled = asyncio.Event()
 
-        async def stream(self, messages, *, tools=None, max_tokens=None):
+        async def stream(self, messages, *, tools=None, max_tokens=None, reasoning_effort=None):
             self.started.set()
             try:
                 await asyncio.Future()
@@ -330,3 +373,88 @@ def test_abort_interrupts_an_in_flight_tool(tmp_path) -> None:
         assert cancelled.is_set()
 
     asyncio.run(scenario())
+
+
+def test_image_tool_result_is_ephemeral_but_reaches_followup_model_turn(tmp_path) -> None:
+    attachment = ImageAttachment(
+        "image.png", "data:image/png;base64,AA==", "image/png", 1, 1
+    )
+
+    async def image_tool(_arguments, _context):
+        from server.agent.registry import ToolOutput
+
+        return ToolOutput("Read image image.png", attachments=(attachment,))
+
+    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    registry = ToolRegistry([Tool("read_image", "read image", schema, image_tool)])
+    client = ScriptedClient(
+        [tool_call("image-1", "read_image", {}), text_response("seen")]
+    )
+    skills = SkillManager(tmp_path / "skills")
+    store = InMemoryConversationStore()
+    core = AgentCore(
+        store=store,
+        clients=LLMClientFactory(client),
+        skills=skills,
+        tools=registry,
+        workspace_root=tmp_path,
+    )
+    events = asyncio.run(collect(core.stream("images", "inspect")))
+    assert events[-1].to_dict()["reason"] == "complete"
+    assert any(message.attachments for message in client.stream_calls[1][0])
+    persisted = asyncio.run(store.list_messages("images"))
+    assert not any(message.attachments for message in persisted)
+
+
+def test_default_skill_loads_once_per_conversation_with_runtime_identity(tmp_path) -> None:
+    skill_dir = tmp_path / "skills" / "wenqu"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: wenqu\ndescription: Persistent training coach\n---\n\n"
+        "Keep every training under the workspace data root.\n",
+        encoding="utf-8",
+    )
+    client = ScriptedClient(
+        [text_response("first"), text_response("second"), text_response("other")]
+    )
+    core, store = make_core(
+        tmp_path,
+        client,
+        config=AgentConfig(default_skills=("wenqu",)),
+        skill_dir=tmp_path / "skills",
+    )
+
+    first = asyncio.run(collect(core.stream("conversation-a", "start")))
+    second = asyncio.run(collect(core.stream("conversation-a", "continue")))
+    other = asyncio.run(collect(core.stream("conversation-b", "start")))
+
+    first_skill = next(event.to_dict() for event in first if event.type == "skill_loaded")
+    second_skill = next(event.to_dict() for event in second if event.type == "skill_loaded")
+    other_skill = next(event.to_dict() for event in other if event.type == "skill_loaded")
+    assert first_skill["status"] == "loaded"
+    assert first_skill["source"] == "default"
+    assert second_skill["status"] == "already_loaded"
+    assert other_skill["status"] == "loaded"
+
+    messages_a = asyncio.run(store.list_messages("conversation-a"))
+    messages_b = asyncio.run(store.list_messages("conversation-b"))
+    injections_a = [
+        message for message in messages_a if message.metadata.get("kind") == "skill_injection"
+    ]
+    injections_b = [
+        message for message in messages_b if message.metadata.get("kind") == "skill_injection"
+    ]
+    assert len(injections_a) == len(injections_b) == 1
+    assert 'conversation_id: "conversation-a"' in injections_a[0].content
+    assert 'conversation_id: "conversation-b"' in injections_b[0].content
+    assert 'workspace_data_root: "wenqu/sessions"' in injections_a[0].content
+    assert "conversation-b" not in injections_a[0].content
+
+
+def test_agent_rejects_a_missing_configured_default_skill(tmp_path) -> None:
+    with pytest.raises(SkillNotFoundError, match="wenqu"):
+        make_core(
+            tmp_path,
+            ScriptedClient([]),
+            config=AgentConfig(default_skills=("wenqu",)),
+        )

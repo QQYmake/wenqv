@@ -199,13 +199,26 @@ def _compose_agent(
         from server.agent.skills import SkillManager
         from server.agent.tools import (
             calculator_tool,
+            file_tools,
             load_skill_tool,
-            read_file_tool,
             remove_skill_tool,
         )
 
-        skills_dir = config.workspace.root / "skills"
+        skills_dir = _resolve_skills_directory(config)
         skill_manager = SkillManager(skills_dir)
+        agent_config = _construct_supported(
+            AgentConfig,
+            {
+                "max_turns": config.agent.max_turns,
+                "max_tool_retries": config.agent.max_tool_retries,
+                "tool_timeout_s": config.agent.tool_timeout_s,
+                "tool_result_max_chars": config.agent.tool_result_max_chars,
+                "max_result_chars": config.agent.tool_result_max_chars,
+                "default_skills": config.agent.default_skills,
+            },
+        )
+        for name in config.agent.default_skills:
+            skill_manager.get(name)
         # The ClientResolver port replaces the startup-time LLMClientFactory
         # singleton. Per-workspace user configs are honoured via the resolver;
         # when no user config exists it falls back to config.llm.* defaults.
@@ -221,20 +234,13 @@ def _compose_agent(
         registry = ToolRegistry(
             [
                 calculator_tool(),
-                read_file_tool(),
+                *file_tools(),
                 load_skill_tool(skill_manager),
-                remove_skill_tool(skill_manager),
+                remove_skill_tool(
+                    skill_manager,
+                    protected_names=config.agent.default_skills,
+                ),
             ]
-        )
-        agent_config = _construct_supported(
-            AgentConfig,
-            {
-                "max_turns": config.agent.max_turns,
-                "max_tool_retries": config.agent.max_tool_retries,
-                "tool_timeout_s": config.agent.tool_timeout_s,
-                "tool_result_max_chars": config.agent.tool_result_max_chars,
-                "max_result_chars": config.agent.tool_result_max_chars,
-            },
         )
         core = _construct_supported(
             AgentCore,
@@ -262,6 +268,27 @@ def _compose_agent(
     except Exception as exc:
         logger.exception("Agent Core composition failed")
         return UnavailableAgent(str(exc)), skill_manager, context_manager
+
+
+def _resolve_skills_directory(config: AppConfig) -> Path:
+    """Find packaged Skills independently from per-workspace runtime data.
+
+    ``AGENT_WORKSPACE_ROOT`` may point at an external writable data directory;
+    packaged Skill markdown remains next to the application's config (or in
+    the workspace root for injected test configurations). Keeping these roots
+    separate prevents a valid production workspace override from disabling the
+    configured default Skills.
+    """
+
+    candidates: list[Path] = []
+    if config.config_path is not None:
+        candidates.append(config.config_path.parent / "skills")
+    candidates.append(config.workspace.root / "skills")
+    candidates.append(Path(__file__).resolve().parents[1] / "skills")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
 
 
 def _construct_supported(factory: Any, candidates: dict[str, Any]) -> Any:

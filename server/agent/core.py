@@ -17,7 +17,7 @@ from .models import AgentEvent, ChatMessage, LLMStreamChunk, ToolCall
 from .ports import ConversationStore, LLMClient, LLMClientProvider, WorkspaceResolver
 from .registry import ToolExecutionContext, ToolExecutionResult, ToolRegistry
 from .skills import SkillManager, SkillNotFoundError
-from .tools import calculator_tool, load_skill_tool, read_file_tool, remove_skill_tool
+from .tools import calculator_tool, file_tools, load_skill_tool, remove_skill_tool
 
 
 class AgentRunCancelled(Exception):
@@ -29,7 +29,8 @@ class AgentConfig:
     max_turns: int = 20
     max_tool_retries: int = 2
     tool_timeout_s: float = 60.0
-    tool_result_max_chars: int = 16_000
+    tool_result_max_chars: int = 65_536
+    default_skills: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.max_turns < 1:
@@ -40,6 +41,10 @@ class AgentConfig:
             raise ValueError("tool_timeout_s must be positive")
         if self.tool_result_max_chars < 64:
             raise ValueError("tool_result_max_chars must be at least 64")
+        if any(not name.strip() for name in self.default_skills):
+            raise ValueError("default_skills cannot contain blank names")
+        if len(set(self.default_skills)) != len(self.default_skills):
+            raise ValueError("default_skills cannot contain duplicates")
 
 
 @dataclass(slots=True)
@@ -59,17 +64,22 @@ class _ToolCallBuffer:
 class _CompletedModelTurn:
     content: str
     calls: tuple[ToolCall, ...]
+    reasoning_summary: str = ""
 
 
-def build_default_registry(skills: SkillManager) -> ToolRegistry:
+def build_default_registry(
+    skills: SkillManager,
+    *,
+    protected_skills: Sequence[str] = (),
+) -> ToolRegistry:
     """Create the built-ins used to exercise the complete agent loop."""
 
     return ToolRegistry(
         [
             calculator_tool(),
-            read_file_tool(),
+            *file_tools(),
             load_skill_tool(skills),
-            remove_skill_tool(skills),
+            remove_skill_tool(skills, protected_names=protected_skills),
         ]
     )
 
@@ -100,8 +110,17 @@ class AgentCore:
         self.store = store
         self.clients = clients
         self.skills = skills
-        self.tools = tools if tools is not None else build_default_registry(skills)
         self.config = config
+        for name in config.default_skills:
+            skills.get(name)
+        self.tools = (
+            tools
+            if tools is not None
+            else build_default_registry(
+                skills,
+                protected_skills=config.default_skills,
+            )
+        )
         self.context = context_manager or ContextManager(clients, context_config)
         self.workspace_root = Path(workspace_root).resolve()
         self.workspace_resolver = workspace_resolver
@@ -115,6 +134,7 @@ class AgentCore:
         *,
         workspace_id: str | None = None,
         request_id: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> AsyncIterator[AgentEvent]:
         return self._stream(
             session_id,
@@ -122,6 +142,7 @@ class AgentCore:
             selected_skills,
             workspace_id=workspace_id,
             request_id=request_id,
+            reasoning_effort=reasoning_effort,
         )
 
     def run_stream(
@@ -132,6 +153,7 @@ class AgentCore:
         *,
         workspace_id: str | None = None,
         request_id: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> AsyncIterator[AgentEvent]:
         """Compatibility alias for delivery adapters."""
 
@@ -141,6 +163,7 @@ class AgentCore:
             selected_skills,
             workspace_id=workspace_id,
             request_id=request_id,
+            reasoning_effort=reasoning_effort,
         )
 
     async def abort(self, session_id: str, request_id: str | None = None) -> bool:
@@ -173,6 +196,7 @@ class AgentCore:
         *,
         workspace_id: str | None,
         request_id: str | None,
+        reasoning_effort: str,
     ) -> AsyncIterator[AgentEvent]:
         run_id = request_id or uuid.uuid4().hex
         if not session_id.strip():
@@ -197,13 +221,36 @@ class AgentCore:
         self._active[session_id] = active
         turns = 0
         try:
-            names = _ordered_unique(
-                [*selected_skills, *self.skills.extract_mentions(message)]
-            )
-            for name in names:
+            defaults = _ordered_unique(self.config.default_skills)
+            explicit = [
+                name
+                for name in _ordered_unique(
+                    [*selected_skills, *self.skills.extract_mentions(message)]
+                )
+                if name not in defaults
+            ]
+            requested = [
+                *((name, "default") for name in defaults),
+                *((name, "explicit") for name in explicit),
+            ]
+            for name, source in requested:
                 try:
                     results = await self.skills.inject_selected(
-                        self.store, session_id, [name]
+                        self.store,
+                        session_id,
+                        [name],
+                        runtime_context=(
+                            {
+                                "conversation_id": session_id,
+                                **(
+                                    {"workspace_data_root": "wenqu/sessions"}
+                                    if name == "wenqu"
+                                    else {}
+                                ),
+                            }
+                            if source == "default"
+                            else None
+                        ),
                     )
                 except SkillNotFoundError as exc:
                     yield _error("skill_not_found", str(exc), run_id, recoverable=True)
@@ -214,7 +261,7 @@ class AgentCore:
                     {
                         "name": result.name,
                         "status": "loaded" if result.loaded else "already_loaded",
-                        "source": "explicit",
+                        "source": source,
                         "request_id": run_id,
                     },
                 )
@@ -227,6 +274,7 @@ class AgentCore:
 
             consecutive_failures = 0
             force_final = False
+            ephemeral_after_call: dict[str, ChatMessage] = {}
             for turn in range(1, self.config.max_turns + 1):
                 turns = turn
                 _raise_if_cancelled(active.cancel)
@@ -234,14 +282,18 @@ class AgentCore:
                     session_id, workspace_id=workspace_id
                 )
                 schemas = None if force_final else self.tools.schemas()
+                model_messages = _insert_ephemeral_messages(
+                    prepared.messages, ephemeral_after_call
+                )
                 completed: _CompletedModelTurn | None = None
                 async for item in self._model_turn(
                     self.clients.get_client("main", workspace_id),
-                    prepared.messages,
+                    model_messages,
                     schemas,
                     active.cancel,
                     turn,
                     run_id,
+                    reasoning_effort,
                 ):
                     if isinstance(item, AgentEvent):
                         yield item
@@ -251,14 +303,19 @@ class AgentCore:
                     raise RuntimeError("LLM stream ended without a completed turn")
 
                 content, calls = completed.content, completed.calls
-                if content or calls:
+                if content or calls or completed.reasoning_summary:
                     await self.store.add_message(
                         session_id,
                         ChatMessage(
                             role="assistant",
                             content=content or None,
                             tool_calls=calls,
-                            metadata={"request_id": run_id, "turn": turn},
+                            metadata={
+                                "request_id": run_id,
+                                "turn": turn,
+                                "reasoning_effort": reasoning_effort,
+                                "reasoning_summary": completed.reasoning_summary,
+                            },
                         ),
                     )
 
@@ -295,6 +352,7 @@ class AgentCore:
                         yield _done("complete", run_id, turns=turn)
                     return
 
+                turn_attachments = []
                 for call in calls:
                     _raise_if_cancelled(active.cancel)
                     yield AgentEvent(
@@ -314,6 +372,7 @@ class AgentCore:
                         workspace_root=self._workspace(workspace_id),
                         request_id=run_id,
                         workspace_id=workspace_id,
+                        cancel_event=active.cancel,
                     )
                     result = await _await_or_cancel(
                         self.tools.execute(
@@ -338,7 +397,17 @@ class AgentCore:
                     )
                     if skill_event is not None:
                         yield skill_event
+                    turn_attachments.extend(result.attachments)
                     consecutive_failures = consecutive_failures + 1 if result.error else 0
+
+                if turn_attachments:
+                    paths = ", ".join(attachment.path for attachment in turn_attachments)
+                    ephemeral_after_call[calls[-1].id] = ChatMessage(
+                        role="user",
+                        content=f"Images returned by the read tool: {paths}",
+                        attachments=tuple(turn_attachments),
+                        metadata={"kind": "ephemeral_tool_images", "request_id": run_id},
+                    )
 
                 if consecutive_failures > self.config.max_tool_retries:
                     force_final = True
@@ -395,10 +464,16 @@ class AgentCore:
         cancel: asyncio.Event,
         turn: int,
         request_id: str,
+        reasoning_effort: str,
     ) -> AsyncIterator[AgentEvent | _CompletedModelTurn]:
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         buffers: dict[int, _ToolCallBuffer] = {}
-        stream = client.stream(messages, tools=tools)
+        stream = client.stream(
+            messages,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+        )
         if inspect.isawaitable(stream):
             stream = await _await_or_cancel(stream, cancel)
         iterator = stream.__aiter__()
@@ -419,6 +494,16 @@ class AgentCore:
                         "request_id": request_id,
                     },
                 )
+            if chunk.reasoning_delta:
+                reasoning_parts.append(chunk.reasoning_delta)
+                yield AgentEvent(
+                    "reasoning_delta",
+                    {
+                        "delta": chunk.reasoning_delta,
+                        "turn": turn,
+                        "request_id": request_id,
+                    },
+                )
             for delta in chunk.tool_call_deltas:
                 buffer = buffers.setdefault(delta.index, _ToolCallBuffer())
                 if delta.id:
@@ -435,7 +520,11 @@ class AgentCore:
             )
             for index, buffer in sorted(buffers.items())
         )
-        yield _CompletedModelTurn("".join(content_parts), calls)
+        yield _CompletedModelTurn(
+            "".join(content_parts),
+            calls,
+            "".join(reasoning_parts),
+        )
 
     async def _persist_tool_result(
         self,
@@ -452,6 +541,11 @@ class AgentCore:
             "error": result.error,
             "truncated": result.truncated,
         }
+        if isinstance(result.metadata.get("ui_patch"), str):
+            base_metadata["ui_patch"] = result.metadata["ui_patch"]
+            base_metadata["ui_patch_truncated"] = bool(
+                result.metadata.get("ui_patch_truncated", False)
+            )
         skill_event: AgentEvent | None = None
 
         if action == "load" and skill_name:
@@ -600,6 +694,19 @@ def _ordered_unique(values: Sequence[str]) -> list[str]:
     return result
 
 
+def _insert_ephemeral_messages(
+    messages: Sequence[ChatMessage], after_call: dict[str, ChatMessage]
+) -> tuple[ChatMessage, ...]:
+    if not after_call:
+        return tuple(messages)
+    result: list[ChatMessage] = []
+    for message in messages:
+        result.append(message)
+        if message.role == "tool" and message.tool_call_id in after_call:
+            result.append(after_call[message.tool_call_id])
+    return tuple(result)
+
+
 def _error(
     code: str,
     message: str,
@@ -622,4 +729,3 @@ def _done(reason: str, request_id: str, *, turns: int) -> AgentEvent:
     return AgentEvent(
         "done", {"reason": reason, "turns": turns, "request_id": request_id}
     )
-

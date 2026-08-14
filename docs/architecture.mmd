@@ -12,7 +12,7 @@ flowchart TD
     subgraph CLIENT["① React + Vite SPA — web/src"]
         direction TB
         App["App.tsx<br/>运行时状态枢纽"]
-        UI["组件<br/>Composer · Sidebar · SettingsPanel<br/>MessageList · ExecutionTrace"]
+        UI["组件<br/>Composer（每轮 reasoning_effort）<br/>MessageList（折叠“思考中”）· ExecutionTrace（edit diff）"]
         APICLIENT["api/client.ts<br/>REST 请求 + fetch"]
         SSE["api/sse.ts<br/>parseSSEStream 增量解析"]
         LAKE["LakeBackground.tsx<br/>Three.js 湖面（懒加载）"]
@@ -24,7 +24,7 @@ flowchart TD
         MAIN["main.py<br/>懒加载组合根<br/>create_app / __getattr__"]
         AUTH["AuthMiddleware<br/>cookie → X-Workspace-ID · 401 守卫"]
         DEPS["dependencies.py<br/>get_workspace_id / get_services"]
-        CHAT["chat.py<br/>SSE 编码 · 404/412/409 · 取消协调"]
+        CHAT["chat.py<br/>reasoning_effort 校验 · SSE 编码<br/>404/412/409 · 取消协调"]
         SESSIONS["sessions.py<br/>workspace 作用域 CRUD"]
         META["meta.py<br/>/api/bootstrap · /api/skills · /api/config"]
         UCFG["user_config.py<br/>掩码读 · 加密写 · 连接探测"]
@@ -34,11 +34,12 @@ flowchart TD
     %% ==================== ③ Agent Core ====================
     subgraph CORE["③ 与 HTTP 无关的 Agent Core — server/agent"]
         direction TB
-        ACORE["AgentCore._stream<br/>可取消 ReAct 循环"]
+        ACORE["AgentCore._stream<br/>默认 Skill → 显式 Skill → 用户消息<br/>可取消 ReAct 循环"]
         CTX["ContextManager.prepare<br/>token 预算 · summary 摘要 · 确定性截断"]
-        SKILL["SkillManager<br/>scan · inject_selected · @mention"]
+        SKILL["SkillManager<br/>平铺 + 目录包扫描<br/>默认 / 显式注入 · @mention"]
         REG["ToolRegistry + Tool<br/>校验 · 超时 · 结果截断"]
-        TOOLS["内置工具<br/>calculator · read_file<br/>load_skill · remove_skill"]
+        TOOLS["基础工具<br/>calculator · load_skill<br/>remove_skill（默认项受保护）"]
+        FILETOOLS["全局文件工具<br/>read · write · edit<br/>grep · find · ls"]
         PORTS["端口 ports.py<br/>ClientResolver · ConversationStore<br/>WorkspaceResolver · LLMClient"]
     end
 
@@ -50,7 +51,7 @@ flowchart TD
         SCACHE["SideCache<br/>内存 TTL + 可选 Redis"]
         UREPO["UserConfigRepository<br/>Fernet 加解密 · 掩码 · 合并默认"]
         RESOLVER["LLMResolverAdapter<br/>每 workspace 解析 · LRU 客户端池"]
-        OAI["OpenAICompatClient<br/>OpenAI SDK 适配"]
+        OAI["OpenAICompatClient<br/>顶层 reasoning_effort · 临时图片输入<br/>视觉拒绝后无图重试一次"]
         WRES["IsolatedWorkspaceResolver<br/>per-workspace 文件根"]
     end
 
@@ -60,8 +61,9 @@ flowchart TD
         DB[("SQLite 文件")]
         REDIS[("Redis（可选）")]
         REMOTE["OpenAI 兼容<br/>模型端点"]
-        SKILLFILES["skills/*.md"]
-        WFILES["workspace 文件"]
+        SKILLFILES["Skill 指令<br/>skills/*.md<br/>skills/*/SKILL.md"]
+        WFILES["per-workspace 文件根<br/>&lt;root&gt;/&lt;workspace_id&gt;"]
+        WENQU["问渠训练档案<br/>wenqu/sessions/&lt;training_id&gt;<br/>current.md + 阶段文件"]
     end
 
     %% ==================== 前端内部 ====================
@@ -81,23 +83,26 @@ flowchart TD
     UCFG -->|"warm() 失效缓存"| RESOLVER
 
     %% ==================== 聊天 / 取消链路 ====================
-    APICLIENT -->|"POST /api/chat（SSE）"| CHAT
+    UI -->|"选择 low / medium / high / max"| App
+    APICLIENT -->|"POST /api/chat<br/>reasoning_effort + SSE"| CHAT
     CHAT --> SVC
     SVC -->|"AgentAdapter.stream"| ACORE
-    CHAT -.->|"类型化 SSE 帧回流"| APICLIENT
+    CHAT -.->|"text / reasoning / tool + edit patch SSE"| APICLIENT
     APICLIENT -->|"POST /api/chat/abort"| CHAT
     SVC -->|"RunCoordinator.request_abort"| ACORE
 
     %% ==================== Agent Core 内部 ====================
     ACORE -->|"prepare_context 每轮"| CTX
-    ACORE -->|"inject_selected"| SKILL
+    ACORE -->|"default_skills 每 conversation 一次<br/>再注入选择项"| SKILL
     ACORE -->|"tools.execute"| REG
-    REG --> TOOLS
+    REG --> TOOLS & FILETOOLS
     ACORE --> PORTS
     CTX -->|"get_client('summary')"| PORTS
-    ACORE -->|"get_client('main')"| PORTS
+    ACORE -->|"get_client('main')<br/>同一运行继承所选强度"| PORTS
     TOOLS -->|"load_skill / remove_skill"| SKILL
-    TOOLS -->|"read_file"| WFILES
+    FILETOOLS -->|"安全解析 · 读写 · 搜索"| WFILES
+    FILETOOLS -->|"owner 校验 · 显式续训转移"| WENQU
+    FILETOOLS -.->|"图片仅当前 run 临时附加"| ACORE
     SKILLFILES -->|"scan"| SKILL
 
     %% ==================== 六边形边界：端口实现 ====================
@@ -107,7 +112,7 @@ flowchart TD
     PORTS -.->|"实现 LLMClient"| OAI
 
     %% ==================== 持久化链路 ====================
-    SADAPTER --> SQLITE
+    SADAPTER -->|"回答 + reasoning/effort + edit patch 元数据"| SQLITE
     SKILL -->|"inject_skill 去重持久化"| SADAPTER
     SQLITE --> DB
     SQLITE --> SCACHE
@@ -119,14 +124,16 @@ flowchart TD
     %% ==================== 出站 ====================
     RESOLVER -->|"读取加密配置 + 合并默认"| UREPO
     RESOLVER -->|"构建 / 池化客户端"| OAI
-    OAI -->|"stream / complete"| REMOTE
+    OAI -->|"Chat Completions stream / complete"| REMOTE
     WRES --> WFILES
+    WFILES --> WENQU
+    SESSIONS -.->|"删除 conversation<br/>不删除训练档案"| WENQU
 
     %% ==================== 组合根 ====================
     MAIN -.->|"装配 APIServices"| SVC
     MAIN -.->|"构建 store + SideCache"| SQLITE
     MAIN -.->|"构建 ClientResolver"| RESOLVER
-    MAIN -.->|"懒加载组合 AgentCore"| ACORE
+    MAIN -.->|"配置 default_skills<br/>懒加载组合 AgentCore"| ACORE
 
     %% ==================== 图例 ====================
     subgraph LEGEND["图例"]

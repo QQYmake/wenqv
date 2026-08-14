@@ -90,6 +90,7 @@ async def _chat_stream(
 ) -> AsyncIterator[bytes]:
     terminal: dict[str, Any] | None = None
     assistant_parts: list[str] = []
+    reasoning_parts: list[str] = []
     transport_persists = not services.agent.persists_messages
     try:
         if transport_persists:
@@ -101,6 +102,7 @@ async def _chat_stream(
             selected_skills=body.skills,
             workspace_id=workspace_id,
             request_id=run.request_id,
+            reasoning_effort=body.reasoning_effort,
         ):
             if await request.is_disconnected():
                 run.abort_event.set()
@@ -119,13 +121,22 @@ async def _chat_stream(
                 break
             if event["type"] == "text_delta":
                 assistant_parts.append(str(event.get("delta", "")))
+            if event["type"] == "reasoning_delta":
+                reasoning_parts.append(str(event.get("delta", "")))
             if transport_persists:
                 await _persist_transport_event(services, body.session_id, event)
             yield encode_sse(event)
 
-        if transport_persists and assistant_parts:
+        if transport_persists and (assistant_parts or reasoning_parts):
             await services.store.add_message(
-                body.session_id, "assistant", "".join(assistant_parts)
+                body.session_id,
+                "assistant",
+                "".join(assistant_parts),
+                metadata={
+                    "request_id": run.request_id,
+                    "reasoning_effort": body.reasoning_effort,
+                    "reasoning_summary": "".join(reasoning_parts),
+                },
             )
         if terminal is None:
             terminal = {

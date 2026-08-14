@@ -84,7 +84,8 @@ body {
 
 button,
 textarea,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -105,6 +106,7 @@ label {
 button:focus-visible,
 textarea:focus-visible,
 input:focus-visible,
+select:focus-visible,
 summary:focus-visible,
 a:focus-visible {
   outline: 2px solid var(--focus);
@@ -896,6 +898,48 @@ a:focus-visible {
   gap: 6px;
 }
 
+.reasoning-effort-control {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  gap: 6px;
+  padding: 0 5px 0 10px;
+  color: var(--ink-faint);
+  background: color-mix(in srgb, var(--blue-soft) 52%, var(--surface-muted));
+  border: 1px solid color-mix(in srgb, var(--blue-deep) 12%, transparent);
+  border-radius: 11px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.reasoning-effort-control > span {
+  letter-spacing: 0.04em;
+}
+
+.reasoning-effort-control select {
+  height: 24px;
+  min-width: 48px;
+  padding: 0 5px;
+  color: var(--blue-deep);
+  border: 0;
+  outline: 0;
+  background: transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  font-family: ui-monospace, "Cascadia Mono", monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.reasoning-effort-control select:hover {
+  background: color-mix(in srgb, var(--surface-strong) 62%, transparent);
+}
+
+.reasoning-effort-control select:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 .model-tag {
   display: inline-flex;
   align-items: center;
@@ -1255,23 +1299,76 @@ a:focus-visible {
 .markdown .hljs-built_in,
 .markdown .hljs-type { color: #8fc7ca; }
 
-.thinking-line {
+.reasoning-details {
+  width: min(72ch, 100%);
+  margin: 0 0 13px;
+  overflow: hidden;
+  color: var(--ink-faint);
+  background: color-mix(in srgb, var(--surface-muted) 68%, transparent);
+  border: 1px solid color-mix(in srgb, var(--edge) 82%, transparent);
+  border-radius: 13px;
+}
+
+.reasoning-details summary {
+  display: grid;
+  grid-template-columns: 8px auto minmax(0, 1fr) 16px;
+  align-items: center;
+  min-height: 36px;
+  gap: 8px;
+  padding: 6px 10px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.reasoning-details--static {
   display: flex;
   align-items: center;
-  height: 28px;
-  gap: 5px;
+  min-height: 36px;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
 }
 
-.thinking-line > span:not(.sr-only) {
-  width: 5px;
-  height: 5px;
-  background: var(--ink-faint);
+.reasoning-details summary::-webkit-details-marker { display: none; }
+.reasoning-details summary small {
+  justify-self: end;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.reasoning-state {
+  width: 6px;
+  height: 6px;
+  background: var(--blue);
   border-radius: 50%;
-  animation: thinking 1.15s var(--ease-heavy) infinite;
 }
 
-.thinking-line > span:nth-child(2) { animation-delay: 120ms; }
-.thinking-line > span:nth-child(3) { animation-delay: 240ms; }
+.reasoning-details--pending .reasoning-state {
+  background: var(--sun);
+  animation: working-pulse 1.35s var(--ease-heavy) infinite;
+}
+
+.reasoning-chevron {
+  width: 14px;
+  color: var(--ink-faint);
+  transition: transform 520ms var(--ease-spring);
+}
+
+.reasoning-details[open] .reasoning-chevron { transform: rotate(90deg); }
+
+.reasoning-summary {
+  padding: 10px 14px 12px 26px;
+  border-top: 1px solid var(--edge);
+}
+
+.reasoning-summary .markdown {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.reasoning-summary .markdown p { margin-bottom: 10px; }
 
 .message-error {
   margin-top: 12px;
@@ -1509,7 +1606,7 @@ a:focus-visible {
   .markdown h2 { font-size: 21px; }
   .markdown pre { padding: 15px 14px; border-radius: 15px; }
   .user-bubble { max-width: 90%; font-size: 15px; }
-  .model-tag { max-width: 34vw; }
+  .model-tag { display: none; }
   .abort-button span { display: none; }
   .abort-button { width: 44px; padding: 0; }
   .settings-popover { position: fixed; right: 10px; bottom: calc(86px + env(safe-area-inset-bottom)); left: 10px; width: auto; }

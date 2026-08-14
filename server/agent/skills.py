@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,8 +57,17 @@ class SkillManager:
         if not self.directory.exists():
             self._skills = found
             return ()
-        for path in sorted(self.directory.glob("*.md")):
+        candidates = [
+            *self.directory.glob("*.md"),
+            *self.directory.glob("*/SKILL.md"),
+        ]
+        for path in sorted(candidates, key=lambda item: item.as_posix().casefold()):
             definition = _parse_skill(path)
+            if path.name == "SKILL.md" and path.parent.name != definition.name:
+                raise SkillError(
+                    f"Packaged skill folder '{path.parent.name}' must match "
+                    f"frontmatter name '{definition.name}'"
+                )
             if definition.name in found:
                 other = found[definition.name].path
                 raise SkillError(
@@ -89,14 +99,26 @@ class SkillManager:
                 result.append(name)
         return tuple(result)
 
-    def render(self, name: str) -> str:
+    def render(
+        self,
+        name: str,
+        *,
+        runtime_context: Mapping[str, str] | None = None,
+    ) -> str:
         skill = self.get(name)
-        return (
+        rendered = (
             f'<skill_context name="{skill.name}">\n'
             f"Description: {skill.description}\n\n"
             f"{skill.content.rstrip()}\n"
             "</skill_context>"
         )
+        if not runtime_context:
+            return rendered
+        values = "\n".join(
+            f"{key}: {json.dumps(str(value), ensure_ascii=False)}"
+            for key, value in runtime_context.items()
+        )
+        return f"{rendered}\n<runtime_context>\n{values}\n</runtime_context>"
 
     def build_injection(
         self,
@@ -104,13 +126,14 @@ class SkillManager:
         *,
         role: str = "user",
         tool_call_id: str | None = None,
+        runtime_context: Mapping[str, str] | None = None,
     ) -> ChatMessage:
         self.get(name)
         if role not in ("user", "tool"):
             raise ValueError("Skill injection role must be 'user' or 'tool'")
         return ChatMessage(
             role=role,  # type: ignore[arg-type]
-            content=self.render(name),
+            content=self.render(name, runtime_context=runtime_context),
             tool_call_id=tool_call_id,
             name="load_skill" if role == "tool" else None,
             metadata={"kind": "skill_injection", "skill_name": name},
@@ -121,6 +144,8 @@ class SkillManager:
         store: ConversationStore,
         session_id: str,
         names: Iterable[str],
+        *,
+        runtime_context: Mapping[str, str] | None = None,
     ) -> tuple[SkillInjectionResult, ...]:
         results: list[SkillInjectionResult] = []
         seen: set[str] = set()
@@ -128,7 +153,10 @@ class SkillManager:
             if name in seen:
                 continue
             seen.add(name)
-            message = self.build_injection(name)
+            message = self.build_injection(
+                name,
+                runtime_context=runtime_context,
+            )
             loaded = await store.inject_skill(session_id, name, message)
             results.append(
                 SkillInjectionResult(
@@ -196,4 +224,3 @@ def _parse_frontmatter(lines: Sequence[str], path: Path) -> dict[str, str]:
             value = value[1:-1]
         result[key] = value
     return result
-
