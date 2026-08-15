@@ -24,11 +24,11 @@ def export_file_tool(exporter: DocumentExporter | None = None) -> Tool:
             )
         except DocumentExportError as exc:
             return exc.as_dict()
-        except Exception as exc:  # pragma: no cover - final safety boundary
+        except Exception:  # pragma: no cover - final safety boundary
             return {
                 "error": True,
                 "code": "export_failed",
-                "message": str(exc) or exc.__class__.__name__,
+                "message": "export_failed",
             }
         return exported.to_result()
 

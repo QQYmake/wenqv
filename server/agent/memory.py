@@ -19,6 +19,18 @@ class InMemoryConversationStore:
         self._skills: dict[str, set[str]] = defaultdict(set)
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+    async def seed(
+        self,
+        session_id: str,
+        messages: Sequence[ChatMessage],
+        active_skills: Sequence[str] = (),
+    ) -> None:
+        """Set a request-local initial state before an AgentCore starts."""
+
+        async with self._locks[session_id]:
+            self._messages[session_id] = list(messages)
+            self._skills[session_id] = set(active_skills)
+
     async def list_messages(self, session_id: str) -> Sequence[ChatMessage]:
         async with self._locks[session_id]:
             return tuple(self._messages[session_id])
@@ -78,4 +90,3 @@ class InMemoryConversationStore:
                     )
             self._messages[session_id] = retained
             return True
-

@@ -1,8 +1,8 @@
 # /etc/systemd/system/myapp.service
 # Blue Lake Agent: one FastAPI/Uvicorn process behind nginx.
 #
-# The checked-in unit contains no secret. Put AGENT_SECRET_KEY and the
-# deployment-specific paths in /etc/bluelake-agent.env instead.
+# The checked-in unit contains no provider credentials. The environment file
+# may contain only deployment paths and ordinary operational settings.
 
 [Unit]
 Description=Blue Lake Agent (FastAPI/Uvicorn)
@@ -33,8 +33,8 @@ RestartSec=5s
 TimeoutStopSec=30s
 UMask=0077
 
-# The application tree and the secret file are read-only to the service. Only
-# SQLite, workspace files, exports, and the font/rendering cache are writable.
+# The application tree is read-only to the service. Workspace files, exports,
+# and the font/rendering cache remain writable persistence boundaries.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

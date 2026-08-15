@@ -1,20 +1,17 @@
-"""Application-service ports and compatibility adapters for the HTTP layer."""
+"""Small HTTP-layer adapters with no persistence dependencies."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from inspect import isawaitable
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 import asyncio
 import uuid
 
-from pathlib import Path
-from collections.abc import Callable
-
 from server.config import AppConfig
 from server.services.document_exporter import DocumentExporter
-from server.storage import AgentStoreAdapter, SQLiteStore
 
 
 EVENT_TYPES = frozenset(
@@ -24,39 +21,18 @@ EVENT_TYPES = frozenset(
         "tool_call",
         "tool_result",
         "skill_loaded",
+        "conversation_state",
         "error",
         "done",
     }
 )
 
 
-class UnavailableAgent:
-    """Safe startup fallback used when Agent Core composition fails."""
-
-    persists_messages = False
-
-    def __init__(self, reason: str = "Agent Core is not configured"):
-        self.reason = reason
-
-    async def stream(self, **_: Any) -> AsyncIterator[dict[str, Any]]:
-        yield {
-            "type": "error",
-            "code": "agent_unavailable",
-            "message": self.reason,
-            "recoverable": False,
-        }
-        yield {"type": "done", "finish_reason": "error"}
-
-    async def abort(self, *_: Any, **__: Any) -> bool:
-        return False
-
-
 class AgentAdapter:
-    """Normalize Agent Core methods and events for the API transport."""
+    """Normalize a request-scoped AgentCore for the SSE transport."""
 
     def __init__(self, agent: Any):
         self.agent = agent
-        self.persists_messages = bool(getattr(agent, "persists_messages", True))
 
     async def stream(
         self,
@@ -68,58 +44,21 @@ class AgentAdapter:
         request_id: str,
         reasoning_effort: str,
     ) -> AsyncIterator[dict[str, Any]]:
-        method = (
-            getattr(self.agent, "stream", None)
-            or getattr(self.agent, "run_stream", None)
-            or getattr(self.agent, "stream_chat", None)
-            or getattr(self.agent, "run", None)
+        result = self.agent.stream(
+            session_id=session_id,
+            message=message,
+            selected_skills=tuple(selected_skills),
+            workspace_id=workspace_id,
+            request_id=request_id,
+            reasoning_effort=reasoning_effort,
         )
-        if method is None:
-            raise RuntimeError("Agent does not expose stream/run_stream/stream_chat/run")
-        try:
-            result = method(
-                session_id=session_id,
-                message=message,
-                selected_skills=tuple(selected_skills),
-                workspace_id=workspace_id,
-                request_id=request_id,
-                reasoning_effort=reasoning_effort,
-            )
-        except TypeError as first_error:
-            try:
-                result = method(
-                    session_id=session_id,
-                    message=message,
-                    skills=tuple(selected_skills),
-                    request_id=request_id,
-                    reasoning_effort=reasoning_effort,
-                )
-            except TypeError:
-                raise first_error
         if isawaitable(result):
             result = await result
-        if hasattr(result, "__aiter__"):
-            async for event in result:
-                yield normalize_event(event)
-            return
-        if isinstance(result, str):
-            yield {"type": "text_delta", "delta": result}
-            return
-        if isinstance(result, Mapping) or hasattr(result, "to_dict"):
-            yield normalize_event(result)
-            return
-        if result is not None:
-            for event in result:
-                yield normalize_event(event)
+        async for event in result:
+            yield normalize_event(event)
 
     async def abort(self, session_id: str, request_id: str | None = None) -> bool:
-        method = getattr(self.agent, "abort", None) or getattr(self.agent, "cancel", None)
-        if method is None:
-            return False
-        try:
-            result = method(session_id=session_id, request_id=request_id)
-        except TypeError:
-            result = method(session_id)
+        result = self.agent.abort(session_id, request_id)
         if isawaitable(result):
             result = await result
         return bool(result)
@@ -128,74 +67,51 @@ class AgentAdapter:
 def normalize_event(event: Any) -> dict[str, Any]:
     if hasattr(event, "to_dict"):
         event = event.to_dict()
-    elif hasattr(event, "type") and hasattr(event, "data"):
-        event = {"type": event.type, **dict(event.data)}
     if isinstance(event, str):
         return {"type": "text_delta", "delta": event}
     if not isinstance(event, Mapping):
-        raise TypeError(f"Unsupported Agent event: {type(event).__name__}")
+        raise TypeError("invalid_agent_event")
     normalized = dict(event)
     event_type = str(normalized.get("type", ""))
     if event_type not in EVENT_TYPES:
-        raise ValueError(f"Unsupported Agent event type: {event_type or '<missing>'}")
+        raise ValueError("invalid_agent_event")
     normalized["type"] = event_type
-    if event_type in {"tool_call", "tool_result"}:
-        if "call_id" not in normalized and "tool_call_id" in normalized:
+    if event_type in {"tool_call", "tool_result"} and "call_id" not in normalized:
+        if "tool_call_id" in normalized:
             normalized["call_id"] = normalized["tool_call_id"]
-    if event_type == "tool_call" and "arguments" not in normalized:
-        if "args" in normalized:
-            normalized["arguments"] = normalized["args"]
-    if event_type == "tool_result" and "result" not in normalized:
-        if "content" in normalized:
-            normalized["result"] = normalized["content"]
     if event_type == "skill_loaded" and "already_loaded" not in normalized:
         normalized["already_loaded"] = normalized.get("status") == "already_loaded"
-    if event_type == "done" and "finish_reason" not in normalized:
-        if "reason" in normalized:
-            normalized["finish_reason"] = normalized["reason"]
     return normalized
 
 
 class SkillCatalogAdapter:
-    def __init__(self, manager: Any | None):
+    def __init__(self, manager: Any):
         self.manager = manager
 
     def list_public(self) -> list[dict[str, str]]:
-        if self.manager is None:
-            return []
-        if hasattr(self.manager, "catalog"):
-            values = self.manager.catalog()
-        else:
-            values = self.manager.list()
+        values = self.manager.catalog() if hasattr(self.manager, "catalog") else self.manager.list()
         result: list[dict[str, str]] = []
         for value in values:
-            if hasattr(value, "public_dict"):
-                value = value.public_dict()
-            if isinstance(value, Mapping):
+            value = value.public_dict() if hasattr(value, "public_dict") else value
+            if isinstance(value, Mapping) and value.get("name"):
                 result.append(
                     {
-                        "name": str(value.get("name", "")),
+                        "name": str(value["name"]),
                         "description": str(value.get("description", "")),
                     }
                 )
-            else:
-                result.append(
-                    {
-                        "name": str(getattr(value, "name", "")),
-                        "description": str(getattr(value, "description", "")),
-                    }
-                )
-        return [value for value in result if value["name"]]
+        return result
 
 
 @dataclass(slots=True)
 class ActiveRun:
     request_id: str
     abort_event: asyncio.Event = field(default_factory=asyncio.Event)
+    abort_handler: Any | None = None
 
 
 class RunCoordinator:
-    """Tracks one active run per workspace/session for abort and conflict control."""
+    """Only tracks currently executing request objects in process memory."""
 
     def __init__(self) -> None:
         self._active: dict[tuple[str, str], ActiveRun] = {}
@@ -212,35 +128,56 @@ class RunCoordinator:
             self._active[key] = run
             return run
 
-    async def finish(self, workspace_id: str, session_id: str, request_id: str) -> None:
-        key = (workspace_id, session_id)
+    async def bind_abort_handler(
+        self,
+        workspace_id: str,
+        session_id: str,
+        request_id: str,
+        handler: Any,
+    ) -> bool:
         async with self._lock:
-            current = self._active.get(key)
+            run = self._active.get((workspace_id, session_id))
+            if run is None or run.request_id != request_id:
+                return False
+            run.abort_handler = handler
+            return True
+
+    async def finish(self, workspace_id: str, session_id: str, request_id: str) -> None:
+        async with self._lock:
+            current = self._active.get((workspace_id, session_id))
             if current is not None and current.request_id == request_id:
-                self._active.pop(key, None)
+                self._active.pop((workspace_id, session_id), None)
 
     async def request_abort(
         self, workspace_id: str, session_id: str, request_id: str | None = None
     ) -> bool:
+        handler: Any | None = None
         async with self._lock:
             run = self._active.get((workspace_id, session_id))
             if run is None or (request_id is not None and run.request_id != request_id):
                 return False
             run.abort_event.set()
-            return True
+            handler = run.abort_handler
+        if handler is not None:
+            try:
+                result = handler()
+                if isawaitable(result):
+                    await result
+            except Exception:
+                pass
+        return True
+
+    @property
+    def active_count(self) -> int:
+        return len(self._active)
 
 
 @dataclass(slots=True)
 class APIServices:
     config: AppConfig
-    store: SQLiteStore
-    agent: AgentAdapter
     skill_catalog: SkillCatalogAdapter
-    agent_store: AgentStoreAdapter
-    title_generator: Any | None = None
+    runtime_factory: Any
     runs: RunCoordinator = field(default_factory=RunCoordinator)
-    client_resolver: Any | None = None
-    user_config_repo: Any | None = None
     document_exporter: DocumentExporter | None = None
     workspace_resolver: Callable[[str | None], Path] | None = None
 
@@ -251,6 +188,5 @@ __all__ = [
     "EVENT_TYPES",
     "RunCoordinator",
     "SkillCatalogAdapter",
-    "UnavailableAgent",
     "normalize_event",
 ]

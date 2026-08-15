@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dev launcher for Blue Lake Agent (Ubuntu/Linux).
-# Uses the project virtualenv explicitly and keeps the local Fernet key
-# stable across restarts so saved model configuration remains readable.
+# Uses the project virtualenv explicitly. Browser-local IndexedDB owns chat
+# history and provider credentials, so no server secret or database is needed.
 
 set -euo pipefail
 
@@ -18,28 +18,11 @@ if [[ ! -x "$PYTHON" ]]; then
     exit 1
 fi
 
-if ! "$PYTHON" -c 'import fastapi, uvicorn, openai, cryptography, yaml, aiosqlite' \
+if ! "$PYTHON" -c 'import fastapi, uvicorn, openai, yaml' \
     >/dev/null 2>&1; then
     echo "[INFO] Missing dependencies - installing from requirements.txt ..."
     "$PYTHON" -m pip install -r "$PROJECT_DIR/requirements.txt"
 fi
-
-SECRET_FILE="$PROJECT_DIR/.agent_secret_key"
-if [[ -z "${AGENT_SECRET_KEY:-}" ]]; then
-    if [[ -s "$SECRET_FILE" ]]; then
-        AGENT_SECRET_KEY="$(<"$SECRET_FILE")"
-    else
-        echo "[INFO] Generating local .agent_secret_key ..."
-        AGENT_SECRET_KEY="$("$PYTHON" -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
-        (
-            umask 077
-            printf '%s\n' "$AGENT_SECRET_KEY" > "$SECRET_FILE"
-        )
-    fi
-fi
-
-export AGENT_SECRET_KEY
-export AGENT_COOKIE_SECURE="${AGENT_COOKIE_SECURE:-false}"
 
 HOST="${AGENT_HOST:-127.0.0.1}"
 PORT="${AGENT_PORT:-8000}"

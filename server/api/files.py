@@ -33,7 +33,7 @@ async def download_file(
         path=exported.path,
         media_type=exported.mime_type,
         filename=exported.filename,
-        headers={"Cache-Control": "private, max-age=3600"},
+        headers={"Cache-Control": "no-store"},
     )
 
 

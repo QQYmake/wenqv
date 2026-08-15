@@ -257,8 +257,8 @@ class AgentCore:
                             else None
                         ),
                     )
-                except SkillNotFoundError as exc:
-                    yield _error("skill_not_found", str(exc), run_id, recoverable=True)
+                except SkillNotFoundError:
+                    yield _error("skill_not_found", "skill_not_found", run_id, recoverable=True)
                     continue
                 result = results[0]
                 yield AgentEvent(
@@ -454,8 +454,10 @@ class AgentCore:
         except asyncio.CancelledError:
             # Preserve normal cancellation semantics during server shutdown.
             raise
-        except Exception as exc:
-            yield _error("agent_error", str(exc) or exc.__class__.__name__, run_id)
+        except Exception:
+            # SDK/provider exceptions frequently echo request payloads or
+            # credentials.  The transport must expose a stable code only.
+            yield _error("agent_error", "agent_error", run_id)
             yield _done("error", run_id, turns=turns)
         finally:
             if self._active.get(session_id) is active:

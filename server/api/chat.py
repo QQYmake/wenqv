@@ -1,4 +1,4 @@
-"""Streaming chat and abort endpoints."""
+"""Request-local streaming chat and abort endpoints."""
 
 from __future__ import annotations
 
@@ -6,26 +6,23 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any
 import asyncio
 import json
-import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from server.request_runtime import RequestRuntime
+
 from .dependencies import get_services, get_workspace_id
 from .schemas import AbortChatRequest, ChatRequest
-from .services import APIServices, ActiveRun
+from .services import APIServices, ActiveRun, AgentAdapter
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 def encode_sse(event: Mapping[str, Any]) -> bytes:
-    """Encode one named SSE frame with a JSON payload."""
-
     event_type = str(event.get("type", "message"))
-    payload = json.dumps(
-        dict(event), ensure_ascii=False, separators=(",", ":"), default=str
-    )
+    payload = json.dumps(dict(event), ensure_ascii=False, separators=(",", ":"), default=str)
     return f"event: {event_type}\ndata: {payload}\n\n".encode("utf-8")
 
 
@@ -36,42 +33,48 @@ async def chat(
     workspace_id: str = Depends(get_workspace_id),
     services: APIServices = Depends(get_services),
 ) -> StreamingResponse:
-    session = await services.store.get_session(body.session_id, workspace_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    if services.client_resolver is not None:
-        # Warm the per-workspace config cache (async DB read) and reject with a
-        # structured 4xx when neither a user config nor a default fallback is
-        # available, so the frontend can guide the user to Settings.
-        resolver = services.client_resolver
-        warm = getattr(resolver, "warm", None)
-        if callable(warm):
-            await warm(workspace_id)
-        has_config_async = getattr(resolver, "has_config_async", None)
-        configured = (
-            await has_config_async(workspace_id)
-            if callable(has_config_async)
-            else bool(resolver.has_config(workspace_id))
-        )
-        if not configured:
-            raise HTTPException(status_code=412, detail="API 未配置")
+    known_skills = {skill["name"] for skill in services.skill_catalog.list_public()}
+    if any(skill not in known_skills for skill in body.skills):
+        raise HTTPException(status_code=422, detail="skill_invalid")
     run = await services.runs.start(workspace_id, body.session_id, body.request_id)
     if run is None:
-        raise HTTPException(status_code=409, detail="A chat run is already active")
+        raise HTTPException(status_code=409, detail="chat_run_active")
+    try:
+        runtime = await services.runtime_factory.create(
+            session_id=body.session_id,
+            runtime_context=body.runtime_context.model_dump(mode="json"),
+            provider_config=body.provider_config.model_dump(mode="json"),
+        )
+    except ValueError as exc:
+        await services.runs.finish(workspace_id, body.session_id, run.request_id)
+        code = str(exc)
+        if code not in {"provider_config_invalid", "runtime_context_invalid", "skill_invalid"}:
+            code = "chat_request_invalid"
+        raise HTTPException(status_code=422, detail=code) from None
+    except Exception:
+        await services.runs.finish(workspace_id, body.session_id, run.request_id)
+        raise HTTPException(status_code=503, detail="chat_unavailable") from None
 
-    stream = _chat_stream(
-        body=body,
-        request=request,
-        workspace_id=workspace_id,
-        initial_session=session,
-        run=run,
-        services=services,
+    agent = AgentAdapter(runtime.agent)
+    await services.runs.bind_abort_handler(
+        workspace_id,
+        body.session_id,
+        run.request_id,
+        lambda: agent.abort(body.session_id, run.request_id),
     )
     return StreamingResponse(
-        stream,
+        _chat_stream(
+            body=body,
+            request=request,
+            workspace_id=workspace_id,
+            run=run,
+            services=services,
+            runtime=runtime,
+            agent=agent,
+        ),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache, no-transform",
+            "Cache-Control": "no-store",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
             "X-Request-ID": run.request_id,
@@ -84,19 +87,14 @@ async def _chat_stream(
     body: ChatRequest,
     request: Request,
     workspace_id: str,
-    initial_session: Mapping[str, Any],
     run: ActiveRun,
     services: APIServices,
+    runtime: RequestRuntime,
+    agent: AgentAdapter,
 ) -> AsyncIterator[bytes]:
     terminal: dict[str, Any] | None = None
-    assistant_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    transport_persists = not services.agent.persists_messages
     try:
-        if transport_persists:
-            await services.store.add_message(body.session_id, "user", body.message)
-
-        async for event in services.agent.stream(
+        async for event in agent.stream(
             session_id=body.session_id,
             message=body.message,
             selected_skills=body.skills,
@@ -106,140 +104,71 @@ async def _chat_stream(
         ):
             if await request.is_disconnected():
                 run.abort_event.set()
-                await services.agent.abort(body.session_id, run.request_id)
+                await agent.abort(body.session_id, run.request_id)
                 return
             if run.abort_event.is_set() and event["type"] != "done":
-                terminal = {
-                    "type": "done",
-                    "session_id": body.session_id,
-                    "request_id": run.request_id,
-                    "finish_reason": "aborted",
-                }
+                terminal = _done(body.session_id, run.request_id, "aborted")
                 break
             if event["type"] == "done":
                 terminal = dict(event)
                 break
-            if event["type"] == "text_delta":
-                assistant_parts.append(str(event.get("delta", "")))
-            if event["type"] == "reasoning_delta":
-                reasoning_parts.append(str(event.get("delta", "")))
-            if transport_persists:
-                await _persist_transport_event(services, body.session_id, event)
             yield encode_sse(event)
 
-        if transport_persists and (assistant_parts or reasoning_parts):
-            await services.store.add_message(
-                body.session_id,
-                "assistant",
-                "".join(assistant_parts),
-                metadata={
-                    "request_id": run.request_id,
-                    "reasoning_effort": body.reasoning_effort,
-                    "reasoning_summary": "".join(reasoning_parts),
-                },
-            )
         if terminal is None:
-            terminal = {
-                "type": "done",
-                "session_id": body.session_id,
-                "request_id": run.request_id,
-                "finish_reason": "aborted" if run.abort_event.is_set() else "stop",
-            }
+            terminal = _done(
+                body.session_id,
+                run.request_id,
+                "aborted" if run.abort_event.is_set() else "stop",
+            )
         terminal.setdefault("session_id", body.session_id)
         terminal.setdefault("request_id", run.request_id)
         if run.abort_event.is_set():
             terminal["finish_reason"] = "aborted"
 
-        yield encode_sse(terminal)
-        # The client receives its terminal event immediately. Title generation
-        # remains best-effort and tightly bounded so a slow summary provider
-        # cannot hold the stream open for its full model timeout.
-        await _generate_initial_title(
-            services, initial_session, body.session_id, body.message, workspace_id
-        )
-    except asyncio.CancelledError:
-        run.abort_event.set()
-        await services.agent.abort(body.session_id, run.request_id)
-        raise
-    except Exception as exc:
+        # Send the canonical, possibly summarized context before ``done`` so a
+        # browser can atomically persist it while retaining its full timeline.
         yield encode_sse(
             {
-                "type": "error",
-                "code": "chat_failed",
-                "message": str(exc) or type(exc).__name__,
-                "recoverable": False,
-            }
-        )
-        yield encode_sse(
-            {
-                "type": "done",
+                "type": "conversation_state",
                 "session_id": body.session_id,
                 "request_id": run.request_id,
-                "finish_reason": "error",
+                "runtime_context": await runtime.snapshot(),
             }
         )
+        yield encode_sse(terminal)
+    except asyncio.CancelledError:
+        run.abort_event.set()
+        await agent.abort(body.session_id, run.request_id)
+        raise
+    except Exception:
+        # Provider exceptions can include credentials, prompts, or remote body
+        # text.  The response deliberately contains only a stable code.
+        yield encode_sse({"type": "error", "code": "chat_failed", "message": "chat_failed"})
+        try:
+            snapshot = await runtime.snapshot()
+        except Exception:
+            snapshot = {"messages": [], "active_skills": []}
+        yield encode_sse(
+            {
+                "type": "conversation_state",
+                "session_id": body.session_id,
+                "request_id": run.request_id,
+                "runtime_context": snapshot,
+            }
+        )
+        yield encode_sse(_done(body.session_id, run.request_id, "error"))
     finally:
+        await runtime.close()
         await services.runs.finish(workspace_id, body.session_id, run.request_id)
 
 
-async def _persist_transport_event(
-    services: APIServices, session_id: str, event: Mapping[str, Any]
-) -> None:
-    if event["type"] in {"tool_call", "tool_result"}:
-        await services.store.add_tool_event(session_id, str(event["type"]), event)
-
-
-async def _generate_initial_title(
-    services: APIServices,
-    initial_session: Mapping[str, Any],
-    session_id: str,
-    first_message: str,
-    workspace_id: str,
-) -> None:
-    if int(initial_session.get("message_count", 0)) > 0:
-        return
-    if str(initial_session.get("title", "")).strip().lower() not in {
-        "",
-        "new conversation",
-        "new chat",
-        "新对话",
-    }:
-        return
-    title: str | None = None
-    if services.title_generator is not None:
-        try:
-            messages = await services.agent_store.list_messages(session_id)
-            method = getattr(
-                services.title_generator, "generate_title", services.title_generator
-            )
-            result = method(messages, workspace_id=workspace_id)
-            if hasattr(result, "__await__"):
-                result = await asyncio.wait_for(result, timeout=2.0)
-            if hasattr(result, "content"):
-                result = result.content
-            if result is not None:
-                title = _clean_title(str(result))
-        except Exception:
-            # A summary-model outage must not affect the main chat response.
-            title = None
-    title = title or _fallback_title(first_message)
-    try:
-        await services.store.rename_session(session_id, title)
-    except Exception:
-        pass
-
-
-def _clean_title(value: str) -> str | None:
-    value = value.strip().strip("`#*\"'“”‘’")
-    value = re.sub(r"^(title|标题)\s*[:：]\s*", "", value, flags=re.IGNORECASE)
-    value = " ".join(value.split())
-    return value[:80].rstrip() or None
-
-
-def _fallback_title(message: str) -> str:
-    value = re.sub(r"(?<!\w)@[A-Za-z0-9][A-Za-z0-9_-]{0,63}\b", "", message)
-    value = re.sub(r"\s+", " ", value).strip()
-    return (value[:48].rstrip(" ,.;，。；") or "New conversation")
+def _done(session_id: str, request_id: str, finish_reason: str) -> dict[str, str]:
+    return {
+        "type": "done",
+        "session_id": session_id,
+        "request_id": request_id,
+        "finish_reason": finish_reason,
+    }
 
 
 @router.post("/abort")
@@ -248,14 +177,10 @@ async def abort_chat(
     workspace_id: str = Depends(get_workspace_id),
     services: APIServices = Depends(get_services),
 ) -> dict[str, Any]:
-    session = await services.store.get_session(body.session_id, workspace_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    local = await services.runs.request_abort(
+    aborted = await services.runs.request_abort(
         workspace_id, body.session_id, body.request_id
     )
-    core = await services.agent.abort(body.session_id, body.request_id)
-    return {"aborted": local or core, "session_id": body.session_id}
+    return {"aborted": aborted, "session_id": body.session_id}
 
 
 __all__ = ["encode_sse", "router"]

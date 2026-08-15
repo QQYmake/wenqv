@@ -142,10 +142,10 @@ class ToolRegistry:
     ) -> ToolExecutionResult:
         tool = self.get(name)
         if tool is None:
-            return _error_result(name, f"Unknown tool: {name}")
+            return _error_result(name, "tool_not_found")
         validation_error = _validate_arguments(arguments, tool.parameters)
         if validation_error:
-            return _error_result(name, f"Invalid arguments: {validation_error}")
+            return _error_result(name, "tool_arguments_invalid")
         try:
             result = tool.executor(arguments, context)
             if not inspect.isawaitable(result):
@@ -172,9 +172,9 @@ class ToolRegistry:
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            return _error_result(name, f"Tool timed out after {timeout_s:g}s")
-        except Exception as exc:
-            return _error_result(name, str(exc) or exc.__class__.__name__)
+            return _error_result(name, "tool_timeout")
+        except Exception:
+            return _error_result(name, "tool_failed")
 
 
 def _serialise(value: Any) -> str:

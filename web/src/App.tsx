@@ -1,233 +1,89 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type AgentApi } from "./api/client";
+import { api, setWorkspaceId, type AgentApi } from "./api/client";
 import { parseExportFileResult, triggerFileDownload } from "./api/download";
 import { Composer } from "./components/Composer";
 import { Icon } from "./components/Icon";
 import { MessageList } from "./components/MessageList";
-import { Sidebar } from "./components/Sidebar";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { Sidebar } from "./components/Sidebar";
 import { Welcome } from "./components/Welcome";
-import type {
-  AgentEvent,
-  ChatMessage,
-  PublicConfig,
-  ReasoningEffort,
-  Session,
-  Skill,
-  Theme,
-  ToolTrace,
-} from "./types";
+import {
+  createSession,
+  deleteSession as deleteLocalSession,
+  getWorkspaceId,
+  listSessions,
+  loadConversation,
+  loadProviderConfig,
+  LocalPrivacyError,
+  renameSession as renameLocalSession,
+  saveConversation,
+} from "./storage/local";
+import type { AgentEvent, ChatMessage, PublicConfig, ReasoningEffort, RuntimeContext, Session, Skill, Theme, ToolTrace } from "./types";
 
-const LakeBackground = lazy(() =>
-  import("./scene/LakeBackground").then((module) => ({ default: module.LakeBackground })),
-);
-
+const LakeBackground = lazy(() => import("./scene/LakeBackground").then((module) => ({ default: module.LakeBackground })));
 const THEME_KEY = "blue-lake.theme";
-const SESSION_KEY = "blue-lake.active-session";
-const WORKSPACE_KEY = "blue-lake.workspace-id";
 const REASONING_EFFORT_KEY = "blue-lake.reasoning-effort";
 
 function uniqueId(prefix: string) {
-  const uuid = globalThis.crypto?.randomUUID?.();
-  return uuid ? `${prefix}-${uuid}` : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${crypto.randomUUID()}`;
 }
 
 function initialTheme(): Theme {
   try {
     const stored = localStorage.getItem(THEME_KEY);
     if (stored === "light" || stored === "dark") return stored;
-  } catch {
-    // Storage can be disabled; the OS preference remains a safe fallback.
-  }
+  } catch { /* OS preference is enough when localStorage is blocked. */ }
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-function asReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  return value === "low" || value === "medium" || value === "high" || value === "max"
-    ? value
-    : undefined;
 }
 
 function initialReasoningEffort(): ReasoningEffort {
   try {
-    return asReasoningEffort(localStorage.getItem(REASONING_EFFORT_KEY)) ?? "medium";
-  } catch {
-    return "medium";
-  }
+    const stored = localStorage.getItem(REASONING_EFFORT_KEY);
+    if (stored === "low" || stored === "medium" || stored === "high" || stored === "max") return stored;
+  } catch { /* use the safe default */ }
+  return "medium";
+}
+
+function emptyRuntimeContext(): RuntimeContext {
+  return { messages: [], active_skills: [] };
 }
 
 function parseMaybeJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
+  try { return JSON.parse(value); } catch { return value; }
 }
 
-function metadataValue(message: ChatMessage, key: string) {
-  return message.metadata?.[key];
+function fallbackTitle(message: string): string {
+  return message.replace(/(?<!\w)@[A-Za-z0-9][A-Za-z0-9_-]{0,63}\b/gu, "").replace(/\s+/gu, " ").trim().slice(0, 48).replace(/[ ,.;，。；]+$/u, "") || "新对话";
 }
 
-function nestedAgentMetadata(message: ChatMessage): Record<string, unknown> {
-  const value = message.metadata?._agent;
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+function isNewTitle(title: string): boolean {
+  return ["", "new conversation", "new chat", "新对话"].includes(title.trim().toLocaleLowerCase());
 }
 
-export function hydrateHistory(messages: ChatMessage[]): ChatMessage[] {
-  const display: ChatMessage[] = [];
-  const traceOwners = new Map<string, ChatMessage>();
-  const runOwners = new Map<string, ChatMessage>();
-
-  const mergeText = (current: string | undefined, next: string | undefined) => {
-    const part = next?.trim();
-    if (!part) return current ?? "";
-    if (!current?.trim()) return part;
-    return current.trim() === part ? current : `${current}\n\n${part}`;
+function appendOptimisticUser(context: RuntimeContext, content: string, requestId: string): RuntimeContext {
+  return {
+    ...context,
+    messages: [...context.messages, { role: "user", content, tool_calls: [], tool_call_id: null, name: null, metadata: { request_id: requestId } }],
   };
-
-  for (const message of messages) {
-    const kind = message.kind?.toLocaleLowerCase() ?? "";
-    const payload = parseMaybeJson(message.content);
-    const objectPayload =
-      payload && typeof payload === "object" ? (payload as Record<string, unknown>) : undefined;
-    const agentMetadata = nestedAgentMetadata(message);
-    const requestIdValue = metadataValue(message, "request_id");
-    const requestId =
-      typeof requestIdValue === "string" && requestIdValue.trim() ? requestIdValue : undefined;
-    const reasoningSummary =
-      typeof metadataValue(message, "reasoning_summary") === "string"
-        ? String(metadataValue(message, "reasoning_summary"))
-        : undefined;
-    const reasoningEffort = asReasoningEffort(metadataValue(message, "reasoning_effort"));
-    const callId = String(
-      metadataValue(message, "call_id") ??
-        agentMetadata.tool_call_id ??
-        objectPayload?.call_id ??
-        objectPayload?.tool_call_id ??
-        message.id,
-    );
-    const attachReasoning = (target: ChatMessage) => {
-      target.reasoningEffort ??= reasoningEffort;
-      target.reasoningSummary = mergeText(target.reasoningSummary, reasoningSummary);
-    };
-    const ensureRunOwner = () => {
-      if (!requestId) return undefined;
-      let owner = runOwners.get(requestId);
-      if (!owner) {
-        owner = {
-          ...message,
-          role: "assistant",
-          content: "",
-          traces: [],
-          reasoningEffort,
-          reasoningSummary: "",
-        };
-        display.push(owner);
-        runOwners.set(requestId, owner);
-      }
-      attachReasoning(owner);
-      return owner;
-    };
-
-    if (kind === "skill" || kind === "skill_injection" || kind === "skill_removed") {
-      display.push(message);
-      continue;
-    }
-
-    if (kind === "tool_call") {
-      const storedCalls = Array.isArray(agentMetadata.tool_calls)
-        ? agentMetadata.tool_calls.filter(
-            (item): item is Record<string, unknown> => Boolean(item && typeof item === "object"),
-          )
-        : [];
-      const traces: ToolTrace[] =
-        storedCalls.length > 0
-          ? storedCalls.map((call, index) => ({
-              callId: String(call.id ?? `${message.id}-${index}`),
-              name: String(call.name ?? "tool"),
-              arguments: call.arguments,
-              status: "running",
-            }))
-          : [
-              {
-                callId,
-                name: String(
-                  message.name ?? metadataValue(message, "name") ?? objectPayload?.name ?? "tool",
-                ),
-                arguments:
-                  metadataValue(message, "arguments") ??
-                  objectPayload?.arguments ??
-                  objectPayload?.input ??
-                  payload,
-                status: "running",
-              },
-            ];
-      const traceMessage =
-        ensureRunOwner() ??
-        ({
-          ...message,
-          role: "assistant",
-          content: "",
-          traces: [],
-        } satisfies ChatMessage);
-      traceMessage.content = mergeText(traceMessage.content, message.content);
-      traceMessage.traces = [...(traceMessage.traces ?? []), ...traces];
-      if (!requestId) display.push(traceMessage);
-      traces.forEach((trace) => traceOwners.set(trace.callId, traceMessage));
-      continue;
-    }
-
-    if (message.role === "tool" || kind === "tool_result") {
-      const owner = traceOwners.get(callId);
-      if (owner?.traces) {
-        const error = Boolean(metadataValue(message, "error") ?? objectPayload?.error);
-        owner.traces = owner.traces.map((trace) =>
-          trace.callId === callId
-            ? {
-                ...trace,
-                result: objectPayload?.result ?? payload,
-                error,
-                truncated: Boolean(metadataValue(message, "truncated") ?? objectPayload?.truncated),
-                patch:
-                  typeof metadataValue(message, "ui_patch") === "string"
-                    ? String(metadataValue(message, "ui_patch"))
-                    : undefined,
-                patchTruncated: Boolean(metadataValue(message, "ui_patch_truncated")),
-                status: error ? "error" : "success",
-              }
-            : trace,
-        );
-      }
-      continue;
-    }
-
-    if (message.role === "assistant" && requestId) {
-      const owner = ensureRunOwner();
-      if (owner) owner.content = mergeText(owner.content, message.content);
-      continue;
-    }
-
-    display.push(message);
-  }
-
-  return display;
 }
 
-interface AppProps {
-  client?: AgentApi;
-  renderWater?: boolean;
+interface ConversationCache {
+  messages: ChatMessage[];
+  runtimeContext: RuntimeContext;
 }
+
+interface AppProps { client?: AgentApi; renderWater?: boolean; }
 
 export function App({ client = api, renderWater = true }: AppProps) {
   const [theme, setTheme] = useState<Theme>(initialTheme);
-  const [reasoningEffort, setReasoningEffort] =
-    useState<ReasoningEffort>(initialReasoningEffort);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(initialReasoningEffort);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [config, setConfig] = useState<PublicConfig>({ model_id: "main" });
+  const [config, setConfig] = useState<PublicConfig>({});
+  const [modelId, setModelId] = useState("");
   const [draft, setDraft] = useState("");
   const [selectedSkills, setSelectedSkills] = useState<Set<string>>(new Set());
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
@@ -236,161 +92,91 @@ export function App({ client = api, renderWater = true }: AppProps) {
   const [streaming, setStreaming] = useState(false);
   const [appError, setAppError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [apiConfigured, setApiConfigured] = useState(true);
+  const [apiConfigured, setApiConfigured] = useState(false);
+  const [workspaceId, setLocalWorkspaceId] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
-  const skipSessionLoadRef = useRef<string | null>(null);
   const activeSessionRef = useRef<string | null>(null);
-  const downloadedExportCallsRef = useRef<Set<string>>(new Set());
+  const cacheRef = useRef(new Map<string, ConversationCache>());
+  const savesRef = useRef(new Map<string, Promise<void>>());
+  const downloadedExportCallsRef = useRef(new Set<string>());
 
-  useEffect(() => {
-    activeSessionRef.current = activeSessionId;
-  }, [activeSessionId]);
-
+  useEffect(() => { activeSessionRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => () => abortControllerRef.current?.abort(), []);
 
-  const refreshConfiguredState = useCallback(async () => {
-    // Re-read the server's view of the config so the composer unlocks right
-    // after a config is saved in Settings (the initial load may have run
-    // before anything was configured).
-    const configResult = await client.getConfig().catch(() => null);
-    const userConfigResult =
-      typeof client.getUserConfig === "function"
-        ? await client.getUserConfig().catch(() => null)
-        : null;
-    if (configResult) setConfig(configResult);
-    const hasUserConfig = Boolean(userConfigResult?.has_config);
-    const hasDefault = Boolean(configResult?.model_id);
-    setApiConfigured(hasUserConfig || hasDefault);
-  }, [client]);
+  const updateSession = useCallback((updated: Session | null) => {
+    if (!updated) return;
+    setSessions((current) => [updated, ...current.filter((session) => session.id !== updated.id)].sort((left, right) => String(right.updated_at ?? "").localeCompare(String(left.updated_at ?? ""))));
+  }, []);
 
-  const refreshSessions = useCallback(async () => {
-    const next = await client.listSessions();
-    setSessions(next);
-    return next;
-  }, [client]);
+  const persistConversation = useCallback((sessionId: string, value: ConversationCache) => {
+    cacheRef.current.set(sessionId, value);
+    if (activeSessionRef.current === sessionId) setMessages(value.messages);
+    const previous = savesRef.current.get(sessionId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => updateSession(await saveConversation(sessionId, value.messages, value.runtimeContext)));
+    savesRef.current.set(sessionId, next);
+    void next.finally(() => { if (savesRef.current.get(sessionId) === next) savesRef.current.delete(sessionId); });
+  }, [updateSession]);
+
+  const refreshProviderState = useCallback(async (id: string) => {
+    try {
+      const provider = await loadProviderConfig(id);
+      setApiConfigured(Boolean(provider));
+      setModelId(provider?.main.model ?? "");
+    } catch {
+      setApiConfigured(false);
+      setModelId("");
+    }
+  }, []);
 
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      // Issue (or refresh) the workspace identity cookie first so the
-      // AuthMiddleware has a workspace_id for every following request. The
-      // cookie is HttpOnly; we keep a non-sensitive localStorage mirror only
-      // so the UI can show which workspace is active.
-      if (typeof client.bootstrap === "function") {
-        try {
-          const { workspace_id } = await client.bootstrap();
-          if (alive) {
-            try {
-              localStorage.setItem(WORKSPACE_KEY, workspace_id);
-            } catch {
-              // Storage may be unavailable; the cookie is still the source of truth.
-            }
-          }
-        } catch {
-          // Bootstrap is best-effort; header-based identity (tests) still works.
-        }
-      }
-
-      const [sessionResult, skillResult, configResult, userConfigResult] =
-        await Promise.allSettled([
-          client.listSessions(),
-          client.listSkills(),
-          client.getConfig(),
-          typeof client.getUserConfig === "function"
-            ? client.getUserConfig()
-            : Promise.reject(new Error("no user config endpoint")),
+      try {
+        const id = await getWorkspaceId();
+        if (!alive) return;
+        setWorkspaceId(id);
+        setLocalWorkspaceId(id);
+        const [storedSessions, skillResult, configResult] = await Promise.all([
+          listSessions(), client.listSkills().catch(() => []), client.getConfig().catch(() => ({})), refreshProviderState(id),
         ]);
-      if (!alive) return;
-
-      if (sessionResult.status === "fulfilled") {
-        setSessions(sessionResult.value);
-        try {
-          const remembered = localStorage.getItem(SESSION_KEY);
-          if (remembered && sessionResult.value.some((session) => session.id === remembered)) {
-            setActiveSessionId(remembered);
-          }
-        } catch {
-          // Session remembrance is optional.
-        }
-      }
-      if (skillResult.status === "fulfilled") setSkills(skillResult.value);
-      if (configResult.status === "fulfilled") setConfig(configResult.value);
-      if (userConfigResult.status === "fulfilled") {
-        const hasUserConfig = Boolean(userConfigResult.value.has_config);
-        const hasDefault =
-          configResult.status === "fulfilled" && Boolean(configResult.value.model_id);
-        setApiConfigured(hasUserConfig || hasDefault);
-      } else if (configResult.status === "fulfilled") {
-        // No user-config endpoint (e.g. mocked clients): fall back to whether a
-        // default model id is published by the server.
-        setApiConfigured(Boolean(configResult.value.model_id));
-      }
-
-      const failure = [sessionResult, skillResult, configResult, userConfigResult].find(
-        (result): result is PromiseRejectedResult => result.status === "rejected",
-      );
-      if (failure) setAppError(failure.reason instanceof Error ? failure.reason.message : "部分数据暂时无法读取");
-      setLoadingSessions(false);
+        if (!alive) return;
+        setSessions(storedSessions);
+        setSkills(skillResult);
+        setConfig(configResult);
+        const first = storedSessions[0];
+        if (first) setActiveSessionId(first.id);
+      } catch (cause) {
+        if (!alive) return;
+        setAppError(cause instanceof LocalPrivacyError ? "此浏览器无法提供所需的本地加密存储。" : "无法初始化本地对话存储。");
+      } finally { if (alive) setLoadingSessions(false); }
     };
     void load();
-    return () => {
-      alive = false;
-    };
-  }, [client]);
+    return () => { alive = false; };
+  }, [client, refreshProviderState]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute(
-      "content",
-      theme === "light" ? "#ede9dc" : "#061614",
-    );
-    try {
-      localStorage.setItem(THEME_KEY, theme);
-    } catch {
-      // Theme still works for this tab when persistent storage is unavailable.
-    }
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "light" ? "#ede9dc" : "#061614");
+    try { localStorage.setItem(THEME_KEY, theme); } catch { /* non-sensitive preference only */ }
   }, [theme]);
+  useEffect(() => { try { localStorage.setItem(REASONING_EFFORT_KEY, reasoningEffort); } catch { /* one-tab setting remains */ } }, [reasoningEffort]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(REASONING_EFFORT_KEY, reasoningEffort);
-    } catch {
-      // The selected effort still applies to this tab when storage is unavailable.
-    }
-  }, [reasoningEffort]);
-
-  useEffect(() => {
-    if (!activeSessionId) return;
-    try {
-      localStorage.setItem(SESSION_KEY, activeSessionId);
-    } catch {
-      // Session remembrance is optional.
-    }
-
-    if (skipSessionLoadRef.current === activeSessionId) {
-      skipSessionLoadRef.current = null;
-      return;
-    }
-
+    if (!activeSessionId) { setMessages([]); return; }
+    const cached = cacheRef.current.get(activeSessionId);
+    if (cached) { setMessages(cached.messages); return; }
     let alive = true;
     setLoadingMessages(true);
-    client
-      .getMessages(activeSessionId)
-      .then((history) => {
-        if (alive) setMessages(hydrateHistory(history));
-      })
-      .catch((error: unknown) => {
-        if (alive) setAppError(error instanceof Error ? error.message : "无法恢复对话");
-      })
-      .finally(() => {
-        if (alive) setLoadingMessages(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [activeSessionId, client]);
+    void loadConversation(activeSessionId).then((conversation) => {
+      if (!alive) return;
+      const value = { messages: conversation.messages, runtimeContext: conversation.runtimeContext };
+      cacheRef.current.set(activeSessionId, value);
+      setMessages(value.messages);
+    }).catch(() => { if (alive) setAppError("无法恢复本地对话。"); }).finally(() => { if (alive) setLoadingMessages(false); });
+    return () => { alive = false; };
+  }, [activeSessionId]);
 
   const stopCurrentStream = useCallback(() => {
     const sessionId = activeSessionRef.current;
@@ -400,354 +186,118 @@ export function App({ client = api, renderWater = true }: AppProps) {
 
   const beginNewConversation = () => {
     if (streaming) stopCurrentStream();
-    setActiveSessionId(null);
-    setMessages([]);
-    setDraft("");
-    setSelectedSkills(new Set());
-    setSidebarExpanded(false);
-    try {
-      localStorage.removeItem(SESSION_KEY);
-    } catch {
-      // Nothing else needs to happen.
-    }
+    setActiveSessionId(null); setDraft(""); setSelectedSkills(new Set()); setSidebarExpanded(false);
   };
-
   const selectSession = (id: string) => {
-    if (id === activeSessionId) {
-      setSidebarExpanded(false);
-      return;
-    }
+    if (id === activeSessionRef.current) return setSidebarExpanded(false);
     if (streaming) stopCurrentStream();
-    setMessages([]);
-    setActiveSessionId(id);
-    setSidebarExpanded(false);
+    setActiveSessionId(id); setSidebarExpanded(false);
   };
-
   const renameSession = async (id: string, title: string) => {
-    try {
-      const updated = await client.renameSession(id, title);
-      setSessions((current) => current.map((session) => (session.id === id ? updated : session)));
-    } catch (error) {
-      setAppError(error instanceof Error ? error.message : "重命名失败");
-    }
+    try { updateSession(await renameLocalSession(id, title)); } catch { setAppError("重命名失败"); }
   };
-
   const deleteSession = async (id: string) => {
     try {
-      await client.deleteSession(id);
-      setSessions((current) => current.filter((session) => session.id !== id));
+      await deleteLocalSession(id); cacheRef.current.delete(id); setSessions((current) => current.filter((session) => session.id !== id));
       if (id === activeSessionRef.current) beginNewConversation();
-    } catch (error) {
-      setAppError(error instanceof Error ? error.message : "删除失败");
+    } catch { setAppError("删除失败"); }
+  };
+  const updateAssistant = (sessionId: string, assistantId: string, updater: (message: ChatMessage) => ChatMessage) => {
+    const current = cacheRef.current.get(sessionId);
+    if (!current) return;
+    persistConversation(sessionId, { ...current, messages: current.messages.map((message) => message.id === assistantId ? updater(message) : message) });
+  };
+  const handleAgentEvent = (event: AgentEvent, sessionId: string, assistantId: string) => {
+    if (event.type === "conversation_state") {
+      const current = cacheRef.current.get(sessionId);
+      const runtimeContext = (event as { runtime_context: RuntimeContext }).runtime_context;
+      if (current) persistConversation(sessionId, { ...current, runtimeContext });
+      return;
     }
-  };
-
-  const updateAssistant = (assistantId: string, updater: (message: ChatMessage) => ChatMessage) => {
-    setMessages((current) =>
-      current.map((message) => (message.id === assistantId ? updater(message) : message)),
-    );
-  };
-
-  const handleAgentEvent = (event: AgentEvent, assistantId: string) => {
-    switch (event.type) {
-      case "reasoning_delta":
-        updateAssistant(assistantId, (message) => ({
-          ...message,
-          reasoningSummary: (message.reasoningSummary ?? "") + String(event.delta ?? ""),
-        }));
-        break;
-      case "text_delta":
-        updateAssistant(assistantId, (message) => ({
-          ...message,
-          content: message.content + String(event.delta ?? ""),
-        }));
-        break;
-      case "tool_call": {
-        const trace: ToolTrace = {
-          callId: String(event.call_id),
-          name: String(event.name),
-          arguments: parseMaybeJson(event.arguments),
-          status: "running",
-        };
-        updateAssistant(assistantId, (message) => ({
-          ...message,
-          traces: [...(message.traces ?? []), trace],
-        }));
-        break;
+    if (event.type === "reasoning_delta") return updateAssistant(sessionId, assistantId, (message) => ({ ...message, reasoningSummary: `${message.reasoningSummary ?? ""}${String(event.delta ?? "")}` }));
+    if (event.type === "text_delta") return updateAssistant(sessionId, assistantId, (message) => ({ ...message, content: message.content + String(event.delta ?? "") }));
+    if (event.type === "tool_call") return updateAssistant(sessionId, assistantId, (message) => ({ ...message, traces: [...(message.traces ?? []), { callId: String(event.call_id), name: String(event.name), arguments: parseMaybeJson(event.arguments), status: "running" } satisfies ToolTrace] }));
+    if (event.type === "tool_result") {
+      const callId = String(event.call_id ?? event.tool_call_id ?? uniqueId("tool"));
+      if (event.name === "export_file" && !event.error && !downloadedExportCallsRef.current.has(callId)) {
+        const file = parseExportFileResult(parseMaybeJson(event.result));
+        if (file) { downloadedExportCallsRef.current.add(callId); void triggerFileDownload(file).catch(() => setAppError("文件下载失败")); }
       }
-      case "tool_result":
-        if (event.name === "export_file" && !event.error) {
-          const callId =
-            typeof event.call_id === "string"
-              ? event.call_id
-              : typeof event.tool_call_id === "string"
-                ? event.tool_call_id
-                : "";
-          if (callId && !downloadedExportCallsRef.current.has(callId)) {
-            const file = parseExportFileResult(parseMaybeJson(event.result));
-            if (file) {
-              downloadedExportCallsRef.current.add(callId);
-              triggerFileDownload(file);
-            }
-          }
-        }
-        updateAssistant(assistantId, (message) => {
-          const callId = String(event.call_id ?? event.tool_call_id ?? uniqueId("tool"));
-          let found = false;
-          const traces = (message.traces ?? []).map((trace) => {
-            if (trace.callId !== callId) return trace;
-            found = true;
-            return {
-              ...trace,
-              name: String(event.name ?? trace.name),
-              result: parseMaybeJson(event.result),
-              error: Boolean(event.error),
-              truncated: Boolean(event.truncated),
-              patch: typeof event.patch === "string" ? event.patch : undefined,
-              patchTruncated: Boolean(event.patch_truncated),
-              status: event.error ? "error" : "success",
-            } as ToolTrace;
-          });
-          if (!found) {
-            traces.push({
-              callId,
-              name: String(event.name ?? "tool"),
-              result: parseMaybeJson(event.result),
-              error: Boolean(event.error),
-              truncated: Boolean(event.truncated),
-              patch: typeof event.patch === "string" ? event.patch : undefined,
-              patchTruncated: Boolean(event.patch_truncated),
-              status: event.error ? "error" : "success",
-            });
-          }
-          return { ...message, traces };
+      return updateAssistant(sessionId, assistantId, (message) => {
+        let found = false;
+        const traces = (message.traces ?? []).map((trace) => {
+          if (trace.callId !== callId) return trace;
+          found = true;
+          return { ...trace, name: String(event.name ?? trace.name), result: parseMaybeJson(event.result), error: Boolean(event.error), truncated: Boolean(event.truncated), patch: typeof event.patch === "string" ? event.patch : undefined, patchTruncated: Boolean(event.patch_truncated), status: event.error ? "error" : "success" } satisfies ToolTrace;
         });
-        break;
-      case "skill_loaded":
-        updateAssistant(assistantId, (message) => {
-          const notices = message.skills ?? [];
-          const name = String(event.name);
-          if (notices.some((notice) => notice.name === name)) return message;
-          return {
-            ...message,
-            skills: [...notices, { name, alreadyLoaded: Boolean(event.already_loaded) }],
-          };
-        });
-        break;
-      case "error":
-        updateAssistant(assistantId, (message) => ({ ...message, error: String(event.message) }));
-        break;
-      case "done":
-        updateAssistant(assistantId, (message) => ({
-          ...message,
-          pending: false,
-          content:
-            message.content ||
-            (event.finish_reason === "max_turns"
-              ? "已达到本次任务的最大执行轮次。你可以缩小范围后继续。"
-              : message.content),
-        }));
-        break;
+        if (!found) traces.push({ callId, name: String(event.name ?? "tool"), result: parseMaybeJson(event.result), error: Boolean(event.error), status: event.error ? "error" : "success" });
+        return { ...message, traces };
+      });
     }
+    if (event.type === "skill_loaded") return updateAssistant(sessionId, assistantId, (message) => {
+      const name = String(event.name); if (message.skills?.some((notice) => notice.name === name)) return message;
+      return { ...message, skills: [...(message.skills ?? []), { name, alreadyLoaded: Boolean(event.already_loaded) }] };
+    });
+    if (event.type === "error") return updateAssistant(sessionId, assistantId, (message) => ({ ...message, error: String(event.message), pending: false }));
+    if (event.type === "done") return updateAssistant(sessionId, assistantId, (message) => ({ ...message, pending: false, content: message.content || (event.finish_reason === "max_turns" ? "已达到本次任务的最大执行轮次。你可以缩小范围后继续。" : message.content) }));
   };
 
   const sendMessage = async (rawMessage: string) => {
     const content = rawMessage.trim();
-    if (!content || streaming || sendingRef.current) return;
-    sendingRef.current = true;
-    setAppError(null);
-
+    if (!content || streaming || sendingRef.current || loadingMessages || !workspaceId) return;
+    sendingRef.current = true; setAppError(null);
     let sessionId = activeSessionRef.current;
     try {
       if (!sessionId) {
-        const created = await client.createSession();
-        sessionId = created.id;
-        skipSessionLoadRef.current = created.id;
-        activeSessionRef.current = created.id;
-        setSessions((current) => [created, ...current.filter((item) => item.id !== created.id)]);
-        setActiveSessionId(created.id);
+        const created = await createSession();
+        sessionId = created.id; cacheRef.current.set(sessionId, { messages: [], runtimeContext: emptyRuntimeContext() });
+        updateSession(created); setActiveSessionId(sessionId);
       }
-
-      const mentioned = [...content.matchAll(/@([\w-]+)/gu)]
-        .map((match) => match[1])
-        .filter((name) => skills.some((skill) => skill.name === name));
+      const current = cacheRef.current.get(sessionId) ?? { messages: [], runtimeContext: emptyRuntimeContext() };
+      const provider = await loadProviderConfig(workspaceId);
+      if (!provider) throw new LocalPrivacyError("provider_reconfigure");
+      const mentioned = [...content.matchAll(/@([\w-]+)/gu)].map((match) => match[1]).filter((name) => skills.some((skill) => skill.name === name));
       const requestedSkills = [...new Set([...selectedSkills, ...mentioned])];
-      const userMessage: ChatMessage = {
-        id: uniqueId("user"),
-        session_id: sessionId,
-        role: "user",
-        content,
-      };
+      const requestId = uniqueId("request");
+      const userMessage: ChatMessage = { id: uniqueId("user"), session_id: sessionId, role: "user", content };
       const assistantId = uniqueId("assistant");
-      const assistantMessage: ChatMessage = {
-        id: assistantId,
-        session_id: sessionId,
-        role: "assistant",
-        content: "",
-        traces: [],
-        skills: [],
-        pending: true,
-        reasoningEffort,
-      };
-
-      setMessages((current) => [...current, userMessage, assistantMessage]);
-      setDraft("");
-      setSelectedSkills(new Set());
-      setStreaming(true);
-
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
+      const assistantMessage: ChatMessage = { id: assistantId, session_id: sessionId, role: "assistant", content: "", traces: [], skills: [], pending: true, reasoningEffort };
+      const optimistic = { messages: [...current.messages, userMessage, assistantMessage], runtimeContext: appendOptimisticUser(current.runtimeContext, content, requestId) };
+      persistConversation(sessionId, optimistic);
+      const active = sessions.find((session) => session.id === sessionId);
+      if (active && isNewTitle(active.title)) updateSession(await renameLocalSession(sessionId, fallbackTitle(content)));
+      setDraft(""); setSelectedSkills(new Set()); setStreaming(true);
+      const controller = new AbortController(); abortControllerRef.current = controller;
       let reachedDone = false;
-
       try {
-        for await (const event of client.streamChat(
-          {
-            session_id: sessionId,
-            message: content,
-            reasoning_effort: reasoningEffort,
-            ...(requestedSkills.length > 0 ? { skills: requestedSkills } : {}),
-          },
-          controller.signal,
-        )) {
-          handleAgentEvent(event, assistantId);
+        for await (const event of client.streamChat({ session_id: sessionId, message: content, runtime_context: current.runtimeContext, provider_config: provider, reasoning_effort: reasoningEffort, ...(requestedSkills.length ? { skills: requestedSkills } : {}) }, controller.signal)) {
+          handleAgentEvent(event, sessionId, assistantId);
           if (event.type === "done") reachedDone = true;
         }
-        if (!reachedDone) {
-          updateAssistant(assistantId, (message) => ({ ...message, pending: false }));
-        }
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          updateAssistant(assistantId, (message) => ({
-            ...message,
-            pending: false,
-            content: message.content || "已停止本次生成。",
-          }));
-        } else {
-          updateAssistant(assistantId, (message) => ({
-            ...message,
-            pending: false,
-            error: error instanceof Error ? error.message : "对话流意外中断",
-          }));
-        }
-      } finally {
-        sendingRef.current = false;
-        abortControllerRef.current = null;
-        setStreaming(false);
-        void refreshSessions().catch(() => undefined);
-      }
-    } catch (error) {
-      sendingRef.current = false;
-      setAppError(error instanceof Error ? error.message : "无法创建对话");
-    }
+        if (!reachedDone) updateAssistant(sessionId, assistantId, (message) => ({ ...message, pending: false }));
+      } catch (cause) {
+        updateAssistant(sessionId, assistantId, (message) => ({ ...message, pending: false, content: cause instanceof DOMException && cause.name === "AbortError" ? message.content || "已停止本次生成。" : message.content, error: cause instanceof DOMException && cause.name === "AbortError" ? undefined : "对话流意外中断" }));
+      } finally { abortControllerRef.current = null; setStreaming(false); }
+    } catch (cause) {
+      if (cause instanceof LocalPrivacyError) { setApiConfigured(false); setSettingsOpen(true); setAppError("请重新填写 API 配置后再继续。"); }
+      else setAppError("无法开始对话。");
+    } finally { sendingRef.current = false; }
   };
 
-  const activeSession = useMemo(
-    () => sessions.find((session) => session.id === activeSessionId),
-    [activeSessionId, sessions],
-  );
-  const isConversation = Boolean(activeSessionId && (messages.length > 0 || loadingMessages));
-
-  return (
-    <div className="app" data-theme={theme}>
-      <a className="skip-link" href="#conversation-stage">跳到对话区</a>
-      {renderWater && (
-        <Suspense fallback={<div className="lake-background lake-background--static" aria-hidden="true" />}>
-          <LakeBackground theme={theme} />
-        </Suspense>
-      )}
-      <div className="atmosphere" aria-hidden="true" />
-
-      <Sidebar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        expanded={sidebarExpanded}
-        loading={loadingSessions}
-        theme={theme}
-        apiConfigured={apiConfigured}
-        onExpand={() => setSidebarExpanded(true)}
-        onNew={beginNewConversation}
-        onSelect={selectSession}
-        onRename={renameSession}
-        onDelete={deleteSession}
-        onThemeChange={setTheme}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
-
-      {sidebarExpanded && (
-        <button className="sidebar-scrim" onClick={() => setSidebarExpanded(false)} aria-label="关闭侧栏" />
-      )}
-
-      <main className={`workspace${isConversation ? " workspace--conversation" : " workspace--welcome"}`}>
-        <header className="workspace-header">
-          <button className="mobile-menu" onClick={() => setSidebarExpanded(true)} aria-label="打开侧栏">
-            <Icon name="menu" />
-          </button>
-          <div className="header-title">
-            <span>{activeSession?.title ?? "问渠"}</span>
-            {streaming && <small><i /> 正在工作</small>}
-          </div>
-          <span className="header-watermark">问渠</span>
-        </header>
-
-        <div className="conversation-stage" id="conversation-stage" tabIndex={-1}>
-          {loadingMessages ? (
-            <div className="history-loading" role="status">
-              <span />
-              <p>正在拾起这段对话…</p>
-            </div>
-          ) : isConversation ? (
-            <MessageList messages={messages} />
-          ) : (
-            <Welcome
-              onSuggestion={(prompt) => {
-                setDraft(prompt);
-                requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息"]')?.focus());
-              }}
-            />
-          )}
-
-          <div className="composer-dock">
-            <Composer
-              value={draft}
-              modelId={config.model_id}
-              skills={skills}
-              selectedSkills={selectedSkills}
-              streaming={streaming}
-              abortEnabled={config.features?.abort !== false}
-              apiConfigured={apiConfigured}
-              reasoningEffort={reasoningEffort}
-              onChange={setDraft}
-              onSubmit={(value) => void sendMessage(value)}
-              onAbort={stopCurrentStream}
-              onOpenSettings={() => setSettingsOpen(true)}
-              onReasoningEffortChange={setReasoningEffort}
-              onToggleSkill={(name, selected) =>
-                setSelectedSkills((current) => {
-                  const next = new Set(current);
-                  if (selected) next.add(name);
-                  else next.delete(name);
-                  return next;
-                })
-              }
-            />
-          </div>
-        </div>
-      </main>
-
-      {appError && (
-        <div className="toast" role="alert">
-          <span>{appError}</span>
-          <button onClick={() => setAppError(null)} aria-label="关闭提示"><Icon name="close" /></button>
-        </div>
-      )}
-
-      {settingsOpen && (
-        <SettingsPanel
-          client={client}
-          onClose={() => setSettingsOpen(false)}
-          onConfigSaved={() => void refreshConfiguredState()}
-        />
-      )}
-    </div>
-  );
+  const activeSession = useMemo(() => sessions.find((session) => session.id === activeSessionId), [sessions, activeSessionId]);
+  const isConversation = Boolean(activeSessionId && (messages.length || loadingMessages));
+  return <div className="app" data-theme={theme}>
+    <a className="skip-link" href="#conversation-stage">跳到对话区</a>
+    {renderWater && <Suspense fallback={<div className="lake-background lake-background--static" aria-hidden="true" />}><LakeBackground theme={theme} /></Suspense>}
+    <div className="atmosphere" aria-hidden="true" />
+    <Sidebar sessions={sessions} activeSessionId={activeSessionId} expanded={sidebarExpanded} loading={loadingSessions} theme={theme} apiConfigured={apiConfigured} onExpand={() => setSidebarExpanded(true)} onNew={beginNewConversation} onSelect={selectSession} onRename={renameSession} onDelete={deleteSession} onThemeChange={setTheme} onOpenSettings={() => setSettingsOpen(true)} />
+    {sidebarExpanded && <button className="sidebar-scrim" onClick={() => setSidebarExpanded(false)} aria-label="关闭侧栏" />}
+    <main className={`workspace${isConversation ? " workspace--conversation" : " workspace--welcome"}`}><header className="workspace-header"><button className="mobile-menu" onClick={() => setSidebarExpanded(true)} aria-label="打开侧栏"><Icon name="menu" /></button><div className="header-title"><span>{activeSession?.title ?? "问渠"}</span>{streaming && <small><i /> 正在工作</small>}</div><span className="header-watermark">问渠</span></header>
+      <div className="conversation-stage" id="conversation-stage" tabIndex={-1}>{loadingMessages ? <div className="history-loading" role="status"><span /><p>正在拾起这段对话…</p></div> : isConversation ? <MessageList messages={messages} /> : <Welcome onSuggestion={(prompt) => { setDraft(prompt); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="消息"]')?.focus()); }} />}
+        <div className="composer-dock"><Composer value={draft} modelId={modelId} skills={skills} selectedSkills={selectedSkills} streaming={streaming} abortEnabled={config.features?.abort !== false} apiConfigured={apiConfigured} reasoningEffort={reasoningEffort} onChange={setDraft} onSubmit={(value) => void sendMessage(value)} onAbort={stopCurrentStream} onOpenSettings={() => setSettingsOpen(true)} onReasoningEffortChange={setReasoningEffort} onToggleSkill={(name, selected) => setSelectedSkills((current) => { const next = new Set(current); selected ? next.add(name) : next.delete(name); return next; })} /></div>
+      </div>
+    </main>
+    {appError && <div className="toast" role="alert"><span>{appError}</span><button onClick={() => setAppError(null)} aria-label="关闭提示"><Icon name="close" /></button></div>}
+    {settingsOpen && workspaceId && <SettingsPanel client={client} workspaceId={workspaceId} onClose={() => setSettingsOpen(false)} onConfigSaved={(nextModel) => { setApiConfigured(true); setModelId(nextModel); }} />}
+  </div>;
 }

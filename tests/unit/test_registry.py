@@ -66,12 +66,12 @@ def test_tool_errors_timeouts_and_truncation_are_standardized(tmp_path) -> None:
         failed = await registry.execute(
             "explode", {}, _context(tmp_path), timeout_s=1, max_result_chars=200
         )
-        assert failed.error and json.loads(failed.content)["message"] == "broken"
+        assert failed.error and json.loads(failed.content)["message"] == "tool_failed"
 
         timed_out = await registry.execute(
             "slow", {}, _context(tmp_path), timeout_s=0.01, max_result_chars=200
         )
-        assert timed_out.error and "timed out" in timed_out.content
+        assert timed_out.error and "tool_timeout" in timed_out.content
 
         truncated = await registry.execute(
             "verbose", {}, _context(tmp_path), timeout_s=1, max_result_chars=100
@@ -82,7 +82,7 @@ def test_tool_errors_timeouts_and_truncation_are_standardized(tmp_path) -> None:
         unknown = await registry.execute(
             "missing", {}, _context(tmp_path), timeout_s=1, max_result_chars=200
         )
-        assert unknown.error and "Unknown tool" in unknown.content
+        assert unknown.error and "tool_not_found" in unknown.content
 
     asyncio.run(scenario())
 
@@ -111,7 +111,7 @@ def test_read_is_confined_to_workspace(tmp_path) -> None:
             timeout_s=1,
             max_result_chars=1_000,
         )
-        assert denied.error and "outside" in denied.content
+        assert denied.error and "tool_failed" in denied.content
 
     try:
         asyncio.run(scenario())

@@ -154,11 +154,9 @@ class DocumentExporter:
         try:
             data = exporter(content)
         except ExportConversionError as exc:
-            raise DocumentExportError(exc.code, str(exc)) from exc
-        except Exception as exc:
-            raise DocumentExportError(
-                "conversion_failed", str(exc) or "document conversion failed"
-            ) from exc
+            raise DocumentExportError(exc.code, exc.code) from exc
+        except Exception:
+            raise DocumentExportError("conversion_failed", "conversion_failed") from None
         if len(data) > self.max_exported_bytes:
             raise DocumentExportError(
                 "file_too_large",
@@ -185,10 +183,10 @@ class DocumentExporter:
                 manifest_path,
                 json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
             )
-        except Exception as exc:
+        except Exception:
             output_path.unlink(missing_ok=True)
             manifest_path.unlink(missing_ok=True)
-            raise DocumentExportError("storage_failed", str(exc) or "could not store exported file") from exc
+            raise DocumentExportError("storage_failed", "storage_failed") from None
         return ExportedFile(
             file_id=file_id,
             filename=manifest["filename"],

@@ -80,7 +80,7 @@ def test_malformed_json_tool_arguments_return_error_and_loop_continues(tmp_path)
     payloads = asyncio.run(collect(core))
     tool_result = next(e for e in payloads if e["type"] == "tool_result")
     assert tool_result["error"] is True
-    assert "malformed JSON" in tool_result["content"]
+    assert "tool_arguments_invalid" in tool_result["content"]
     assert payloads[-1]["type"] == "done"
     assert payloads[-1]["reason"] == "complete"
     assert sum(e["type"] == "done" for e in payloads) == 1
@@ -147,7 +147,8 @@ def test_model_stream_raising_propagates_as_error_then_done(tmp_path) -> None:
     assert payloads[-1]["reason"] == "error"
     assert sum(e["type"] == "done" for e in payloads) == 1
     errors = [e for e in payloads if e["type"] == "error"]
-    assert errors and "upstream timeout" in errors[0]["message"]
+    assert errors and errors[0]["message"] == "agent_error"
+    assert "upstream timeout" not in errors[0]["message"]
 
 
 def test_model_stream_yielding_wrong_type_is_reported_as_error(tmp_path) -> None:
@@ -162,7 +163,7 @@ def test_model_stream_yielding_wrong_type_is_reported_as_error(tmp_path) -> None
     assert payloads[-1]["reason"] == "error"
     assert sum(e["type"] == "done" for e in payloads) == 1
     errors = [e for e in payloads if e["type"] == "error"]
-    assert errors and "LLMStreamChunk" in errors[0]["message"]
+    assert errors and errors[0]["message"] == "agent_error"
 
 
 def test_active_run_is_cleaned_up_after_edge_failure(tmp_path) -> None:

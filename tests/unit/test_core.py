@@ -179,11 +179,11 @@ def test_tool_error_returns_to_model_and_does_not_crash_loop(tmp_path) -> None:
 
     tool_result = next(e for e in payloads if e["type"] == "tool_result")
     assert tool_result["error"] is True
-    assert "Unknown tool" in tool_result["content"]
+    assert "tool_not_found" in tool_result["content"]
     assert payloads[-1]["reason"] == "complete"
     # The second model call sees the normalized failure as a tool message.
     assert client.stream_calls[1][0][-1].role == "tool"
-    assert "Unknown tool" in client.stream_calls[1][0][-1].content
+    assert "tool_not_found" in client.stream_calls[1][0][-1].content
 
 
 def test_retry_limit_forces_a_no_tool_final_turn(tmp_path) -> None:

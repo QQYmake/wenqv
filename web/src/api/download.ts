@@ -1,5 +1,5 @@
 import type { ExportFileResult } from "../types";
-import { resolveApiUrl } from "./client";
+import { getWorkspaceHeader, resolveApiUrl } from "./client";
 
 const DOWNLOAD_URL_PATTERN = /^\/api\/files\/([a-f0-9]{32})$/;
 
@@ -35,12 +35,20 @@ export function parseExportFileResult(value: unknown): ExportFileResult | null {
   };
 }
 
-export function triggerFileDownload(file: ExportFileResult): void {
+export async function triggerFileDownload(file: ExportFileResult): Promise<void> {
+  const response = await fetch(resolveApiUrl(file.download_url), {
+    credentials: "omit",
+    headers: getWorkspaceHeader(),
+  });
+  if (!response.ok) throw new Error(`下载失败（${response.status}）`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
-  anchor.href = resolveApiUrl(file.download_url);
+  anchor.href = url;
   anchor.download = file.filename;
   anchor.hidden = true;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+  URL.revokeObjectURL(url);
 }

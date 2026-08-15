@@ -4,7 +4,6 @@ export type ModelRole = "main" | "summary";
 
 export interface Session {
   id: string;
-  workspace_id?: string;
   title: string;
   created_at?: string;
   updated_at?: string;
@@ -60,9 +59,6 @@ export interface ChatMessage {
 }
 
 export interface PublicConfig {
-  model_id: string;
-  summary_model_id?: string | null;
-  summary_uses_main?: boolean;
   limits?: {
     max_turns?: number;
     token_budget?: number;
@@ -77,21 +73,37 @@ export interface ProviderConfigView {
   base_url: string;
   api_key: string;
   model: string;
+  max_tokens?: number | null;
+  temperature?: number | null;
+  timeout_s?: number | null;
 }
 
-export interface UserLLMConfig {
+export interface ProviderConfigSet {
   main: ProviderConfigView;
   summary: ProviderConfigView;
-  has_config: boolean;
 }
 
-export interface UserLLMConfigInput {
-  main: ProviderConfigView;
-  summary: ProviderConfigView;
+export interface RuntimeToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface RuntimeMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string | null;
+  tool_calls: RuntimeToolCall[];
+  tool_call_id: string | null;
+  name: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface RuntimeContext {
+  messages: RuntimeMessage[];
+  active_skills: string[];
 }
 
 export interface ModelDiscoveryRequest {
-  role: ModelRole;
   base_url: string;
   api_key: string;
 }
@@ -117,5 +129,6 @@ export type AgentEvent =
     }
   | { type: "skill_loaded"; name: string; already_loaded?: boolean }
   | { type: "error"; message: string; code?: string; recoverable?: boolean }
+  | { type: "conversation_state"; session_id: string; runtime_context: RuntimeContext }
   | { type: "done"; session_id?: string; finish_reason?: string; message_id?: string }
   | { type: string; [key: string]: unknown };

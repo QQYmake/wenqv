@@ -1,26 +1,9 @@
 server:
   host: 127.0.0.1
   port: 8000
-  # secret_key is NOT stored here; it comes from the AGENT_SECRET_KEY env var.
-  # When llm.require_user_config is true, a missing AGENT_SECRET_KEY fails fast.
   cors_origins:
     - http://localhost:5173
     - http://127.0.0.1:5173
-
-llm:
-  # When true, each visitor must configure their own API key in Settings; the
-  # llm.main block below is only a fallback. A missing AGENT_SECRET_KEY then
-  # fails fast at startup.
-  require_user_config: true
-  main:
-    base_url: ""
-    api_key: ""
-    model: ""
-  # Optional. When omitted or incomplete, summary tasks reuse llm.main.
-  # summary:
-  #   base_url: ""
-  #   api_key: ""
-  #   model: ""
 
 agent:
   max_turns: 20
@@ -35,13 +18,7 @@ context:
   summary_trigger_ratio: 0.8
   preserve_recent_messages: 10
 
-storage:
-  sqlite_path: data/agent.db
-  redis_url: ""
-  cache_ttl_s: 86400
-
 workspace:
-  id: default
   root: .
   # Keep trusted Skill text in the read-only application tree. Production
   # overrides this with AGENT_SKILLS_ROOT when workspace state is external.

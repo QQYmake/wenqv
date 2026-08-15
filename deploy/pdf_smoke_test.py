@@ -16,6 +16,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import uuid
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -174,9 +175,8 @@ def main() -> int:
     ) as client:
         health = client.get("/api/health")
         health.raise_for_status()
-        bootstrap = client.get("/api/bootstrap")
-        bootstrap.raise_for_status()
-        workspace_id = str(bootstrap.json()["workspace_id"])
+        workspace_id = str(uuid.uuid4())
+        client.headers["X-Workspace-ID"] = workspace_id
 
         for format_name in ("md", "txt", "docx", "pdf"):
             exported = exporter.export(

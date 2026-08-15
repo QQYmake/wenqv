@@ -129,6 +129,16 @@ class OpenAICompatClient:
             )
         return self._sdk_client
 
+    async def close(self) -> None:
+        """Release the request-scoped SDK client without retaining credentials."""
+
+        client, self._sdk_client = self._sdk_client, None
+        close = getattr(client, "close", None)
+        if callable(close):
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+
     def _request(self, messages: Sequence[ChatMessage], **overrides: Any) -> dict[str, Any]:
         request: dict[str, Any] = {
             "model": self.config.model,
