@@ -34,7 +34,7 @@ description: 问渠评课反思与教案迭代 Skill。用于基于教案 v1、�
 
       <!-- REVIEW_DONE -->
 
-- current.md 中 review 设为 done，current_skill 设为 wenqu-compare，更新 updated_at。
+- current.md 中 review 设为 done，current_skill 设为 completed，更新 updated_at。
 
 ## 约束
 

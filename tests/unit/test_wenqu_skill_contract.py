@@ -13,7 +13,6 @@ WENQU_SKILLS = {
     "wenqu-draft",
     "wenqu-rehearsal",
     "wenqu-iterate",
-    "wenqu-compare",
     "wenqu-student",
 }
 
