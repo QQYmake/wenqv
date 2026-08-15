@@ -1,39 +1,49 @@
 %% Source of truth: current source code and config, not the rendered preview.
-%% Reading order: browser/API -> AgentCore -> Skills, tools, LLM and state.
+%% Reading order: browser/API -> request runtime -> AgentCore -> Skills, tools, LLM and state.
 %% Solid arrows are executable calls or authoritative data paths. Dashed arrows
 %% are Markdown instructions/runtime constraints, not network calls or services.
-%% Key locations: server/main.py, server/api/chat.py, server/agent/core.py,
-%% server/agent/skills.py, server/storage/*.py, skills/wenqu*/SKILL.md.
+%% Key locations: server/main.py, server/request_runtime.py, server/api/chat.py,
+%% server/agent/core.py, server/agent/skills.py, server/workspace.py,
+%% server/services/document_exporter.py, web/src/storage/local.ts, skills/wenqu*/SKILL.md.
 %%{init: {"theme": "base", "flowchart": {"htmlLabels": true, "nodeSpacing": 34, "rankSpacing": 42}, "themeVariables": {"fontFamily": "Arial, Noto Sans CJK SC, sans-serif", "fontSize": "14px", "lineColor": "#536471"}}}%%
 flowchart TB
-    subgraph FE["Frontend boundary — web/"]
+    subgraph FE["Browser boundary — web/ (owns durable chat state)"]
         direction LR
         UI["React SPA<br/><code>web/src/App.tsx</code> + components"] --> Client["HTTP/SSE client<br/><code>web/src/api/client.ts</code><br/><code>web/src/api/sse.ts</code>"]
+        Client --> Local["Browser-local state owner<br/><code>web/src/storage/local.ts</code><br/>IndexedDB + Web Crypto (AES-GCM)"]
     end
 
     subgraph API["FastAPI / API boundary — server/main.py, server/api/"]
         direction LR
-        App["<code>create_app()</code><br/>composition, CORS, SPA static files"] --> Identity["<code>AuthMiddleware</code> + <code>get_workspace_id</code><br/>HttpOnly <code>workspace_id</code> cookie<br/>or validated header"]
+        App["<code>create_app()</code><br/>composition, CORS, SPA static files"] --> Identity["<code>AuthMiddleware</code> + <code>get_workspace_id</code><br/>anonymous <code>X-Workspace-ID</code> header<br/>no cookie, no DB row"]
         Identity --> Chat["<code>chat.py</code><br/><code>POST /api/chat</code>, abort, SSE"]
-        Identity --> Routes["other API routes<br/><code>sessions.py</code>, <code>meta.py</code>,<br/><code>user_config.py</code>, <code>files.py</code>"]
+        Identity --> Routes["other API routes<br/><code>meta.py</code>, <code>files.py</code>,<br/><code>provider.py</code>"]
         Chat --> Runs["<code>RunCoordinator</code><br/>one active run / (workspace, session)<br/><i>process memory only</i>"]
-        Chat --> Adapter["<code>AgentAdapter</code> — <code>services.py</code><br/>normalizes Agent events for API transport"]
+        Chat --> Adapter["<code>AgentAdapter</code> — <code>services.py</code><br/>normalizes Agent events for SSE transport"]
+        Chat --> Schemas["<code>schemas.py</code><br/>Pydantic transport boundary<br/><code>runtime_context</code> + <code>provider_config</code>"]
+    end
+
+    subgraph RR["Request-scoped runtime — server/request_runtime.py"]
+        direction LR
+        Factory["<code>RequestRuntimeFactory</code><br/>seeds trusted state, builds one runtime per chat"]
+        Factory --> Runtime["<code>RequestRuntime</code><br/>fresh <code>InMemoryConversationStore</code> +<br/><code>RequestProviderClients</code> + <code>AgentCore</code>"]
+        Factory --> Clients["<code>RequestProviderClients</code><br/>main/summary clients, no pooling"]
     end
 
     subgraph AR["Framework-independent Agent Runtime — server/agent/"]
         direction LR
-        Core["<code>AgentCore</code> — <code>core.py</code><br/>cancellable ReAct loop; persisted turns;<br/>tool loop and active-run map"]
+        Core["<code>AgentCore</code> — <code>core.py</code><br/>cancellable ReAct loop; in-memory turns;<br/>tool loop and active-run map"]
         Core --> Context["<code>ContextManager</code><br/>budget, summary, title"]
         Core --> Registry["<code>ToolRegistry</code><br/>schema, validation, timeout"]
         Core --> SkillMgr["<code>SkillManager</code><br/>scan, render, inject/remove context"]
-        Core --> StorePort["<code>ConversationStore</code> port<br/><code>AgentStoreAdapter</code>"]
+        Core --> StorePort["<code>ConversationStore</code> port<br/>seeded from browser <code>runtime_context</code>"]
     end
 
     subgraph SK["Skill Runtime — packaged Markdown assets, not Python services"]
         direction LR
         Catalogue["<code>skills/*.md</code> and <code>skills/*/SKILL.md</code><br/>resolved by <code>server.main:_resolve_skills_directory()</code>"]
         Wenqu["<code>skills/wenqu/SKILL.md</code><br/>default/root: global routing and ownership instructions"]
-        Stages["<code>skills/wenqu-{intake,cocreate,draft,<br/>rehearsal,iterate,compare}/SKILL.md</code><br/>dynamically injected stage instructions"]
+        Stages["<code>skills/wenqu-{intake,cocreate,draft,<br/>rehearsal,iterate}/SKILL.md</code><br/>dynamically injected stage instructions"]
         Student["<code>skills/wenqu-student/SKILL.md</code><br/>student persona for rehearsal"]
         Catalogue --> Wenqu
         Catalogue --> Stages
@@ -43,36 +53,34 @@ flowchart TB
 
     subgraph EX["LLM / tool adapters and authoritative state"]
         direction LR
-        Resolver["<code>LLMResolverAdapter</code><br/><code>server/llm_resolver.py</code><br/>workspace resolution + client pool"]
-        LLM["<code>OpenAICompatClient</code><br/><code>server/agent/llm.py</code>"]
+        LLM["<code>OpenAICompatClient</code><br/><code>server/agent/llm.py</code><br/>request-scoped SDK client"]
         Provider["OpenAI-compatible provider<br/>Chat Completions stream / complete"]
-        ConfigRepo["<code>UserConfigRepository</code><br/>Fernet-encrypted API keys"]
-        Sqlite[("<code>SQLiteStore</code><br/><code>data/agent.db</code> by default<br/><br/>workspaces; sessions; messages;<br/>session_skills; user_configs")]
-        Cache["<code>SideCache</code><br/>memory + optional Redis<br/><i>non-authoritative</i>"]
         Tools["built-in tools<br/><code>calculator</code>; <code>read/write/edit/find/grep/ls</code>;<br/><code>export_file</code>; <code>load_skill/remove_skill</code>"]
-        Workspace["<code>IsolatedWorkspaceResolver</code><br/><code>&lt;workspace root&gt;/&lt;workspace_id&gt;/</code>"]
+        Workspace["<code>IsolatedWorkspaceResolver</code><br/><code>server/workspace.py</code><br/><code>&lt;workspace root&gt;/&lt;workspace_id&gt;/</code>"]
         Files["workspace files<br/>file-tool reads/writes"]
         Training["Wenqu training archive<br/><code>wenqu/sessions/&lt;training_id&gt;/</code><br/><code>current.md</code>, stage files, lesson v1/v2"]
         Exporter["<code>DocumentExporter</code><br/><code>export_file</code> tool"]
         Exports["download artifacts<br/><code>.agent-exports/&lt;opaque-id&gt;.{md,txt,docx,pdf}</code><br/>plus manifest"]
     end
 
-    %% Browser request/response path. /api/chat warms the resolver before Core.
-    Client -->|cookie credentials; HTTP API| App
+    %% Browser request/response path. The browser supplies context + credentials
+    %% per request and persists the returned snapshot.
+    Client -->|X-Workspace-ID header; HTTP API| App
+    Client -.->|runtime_context + provider_config in request body| Chat
     Adapter -->|stream| Core
-    Chat -.->|SSE AgentEvent| Client
+    Chat -.->|SSE AgentEvent + conversation_state| Client
+
+    %% Request runtime wiring.
+    Chat -->|runtime_factory.create| Factory
+    Factory -->|builds| Runtime
+    Runtime --> Core
+    Clients -->|get_client main / summary| LLM
 
     %% LLM path: Core requests main; Context requests summary/title.
-    Core -->|main model messages + tool schemas| Resolver
-    Context -->|summary / title model| Resolver
-    Resolver --> LLM --> Provider
+    Core -->|main model messages + tool schemas| LLM
+    Context -->|summary / title model| LLM
+    LLM --> Provider
     Provider -->|stream chunks / completion| Core
-    Resolver --> ConfigRepo --> Sqlite
-    Sqlite -.->|cached reads| Cache
-
-    %% Agent persistence and API-owned SQLite operations.
-    StorePort -->|conversation messages and session skills| Sqlite
-    Routes -->|session / config / metadata records| Sqlite
 
     %% Tools remain in-process and every filesystem path is workspace-confined.
     Registry -->|execute| Tools
@@ -91,16 +99,18 @@ flowchart TB
 
     classDef frontend fill:#E8F2FF,stroke:#2F6B9A,color:#12324A,stroke-width:1.5px;
     classDef api fill:#EEF7F0,stroke:#3B7A57,color:#173D28,stroke-width:1.5px;
+    classDef runtime fill:#FFF1E6,stroke:#B05A20,color:#4D260C,stroke-width:1.5px;
     classDef agent fill:#F2EDFF,stroke:#7056A3,color:#321E5A,stroke-width:1.5px;
     classDef skill fill:#FFF6DF,stroke:#A46A10,color:#503400,stroke-width:1.5px;
     classDef adapter fill:#FDEEF1,stroke:#A04A63,color:#57192A,stroke-width:1.5px;
     classDef state fill:#EAF7F7,stroke:#287C80,color:#134044,stroke-width:1.5px;
     classDef external fill:#F4F5F7,stroke:#59636E,color:#20262D,stroke-width:1.5px;
 
-    class UI,Client frontend;
-    class App,Identity,Chat,Routes,Runs,Adapter api;
+    class UI,Client,Local frontend;
+    class App,Identity,Chat,Routes,Runs,Adapter,Schemas api;
+    class Factory,Runtime,Clients runtime;
     class Core,Context,Registry,SkillMgr,StorePort agent;
     class Catalogue,Wenqu,Stages,Student skill;
-    class Resolver,LLM,ConfigRepo,Exporter adapter;
-    class Sqlite,Cache,Workspace,Files,Training,Exports state;
+    class LLM,Exporter adapter;
+    class Workspace,Files,Training,Exports state;
     class Provider,Tools external;
